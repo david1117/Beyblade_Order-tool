@@ -66,6 +66,15 @@
   button.cartbtn{margin-left:auto;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
                  background:var(--blue);color:#fff;cursor:pointer;transition:.15s}
   button.cartbtn:hover{filter:brightness(1.1)}
+  table.log{width:100%;border-collapse:collapse;font-size:13px}
+  table.log th,table.log td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  table.log th{color:var(--muted);font-weight:600;font-size:12px}
+  table.log tr:hover{background:rgba(255,255,255,.03)}
+  .ev-ok{color:var(--green)} .ev-bad{color:var(--red)} .ev-info{color:#93c5fd}
+  .ev-time{color:var(--muted);white-space:nowrap;font-family:Consolas,monospace}
+  .ev-store{display:inline-block;padding:2px 8px;border-radius:999px;background:#2a2f3a;font-size:11px}
+  .sumbar{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;color:var(--muted)}
+  .sumbar b{color:#e6e9ef;font-size:15px}
 </style>
 </head>
 <body>
@@ -81,6 +90,7 @@
   <button class="tab" data-tab="eslite">📚 誠品</button>
   <button class="tab" data-tab="momo">🛍️ momo</button>
   <button class="tab" data-tab="tcsb">🪜 墊腳石</button>
+  <button class="tab" data-tab="log">📋 動作紀錄</button>
   <button id="storeBtn" class="storebtn">偵測中</button>
 </div>
 <div id="banner"></div>
@@ -107,8 +117,14 @@ let storesState = {funbox:true, eslite:true, momo:true, tcsb:true};
 const results = {};
 
 function updateStoreBtn(){
-  const on = storesState[activeTab] !== false;
   const b = document.getElementById('storeBtn');
+  const cb = document.getElementById('cartBtn');
+  if(activeTab === 'log'){            // 紀錄分頁不是商店，隱藏這兩顆
+    b.style.display='none'; if(cb) cb.style.display='none';
+    return;
+  }
+  b.style.display=''; if(cb) cb.style.display='';
+  const on = storesState[activeTab] !== false;
   b.className = 'storebtn ' + (on?'on':'off');
   b.textContent = on ? '🟢 偵測中（點此停用）' : '⏸ 已停用偵測（點此啟用）';
 }
@@ -355,9 +371,50 @@ function renderTcsb(state){
   });
 }
 
+function renderLog(state){
+  const cards=document.getElementById('cards');
+  document.getElementById('controlbar').style.display='none';
+  const banner=document.getElementById('banner'); banner.className='show good';
+  banner.textContent='📋 動作紀錄：每次偵測到有貨、加入購物車、失敗都會留下時間。關掉程式也會保存（events.jsonl）。';
+  const evs=state.events||[];
+  cards.style.display='block';
+  if(!evs.length){ cards.innerHTML='<div class="meta" style="padding:12px">還沒有任何動作紀錄。偵測到有貨時就會出現在這裡。</div>'; return; }
+
+  // 上方統計：今天成功加入幾件、失敗幾次
+  // 用「本地日期」比對：後端寫的是台灣時間，用 UTC 會讓凌晨的紀錄算到前一天
+  const _d=new Date();
+  const today=_d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0')+'-'+String(_d.getDate()).padStart(2,'0');
+  const todays=evs.filter(e=>(e.ts||'').slice(0,10)===today);
+  const okCnt=todays.filter(e=>e.ok===true&&/加入購物車/.test(e.action)).length;
+  const badCnt=todays.filter(e=>e.ok===false).length;
+  const hitCnt=todays.filter(e=>/有貨|開商品頁|準點搶/.test(e.action)).length;
+
+  let html='<div class="sumbar">'+
+    '<span>今日偵測到動作 <b>'+hitCnt+'</b> 次</span>'+
+    '<span>成功加入購物車 <b class="ev-ok">'+okCnt+'</b> 件</span>'+
+    '<span>失敗 <b class="ev-bad">'+badCnt+'</b> 次</span>'+
+    '<span>總紀錄 <b>'+evs.length+'</b> 筆</span></div>';
+
+  html+='<table class="log"><thead><tr><th>時間</th><th>商店</th><th>品項</th><th>動作</th><th>說明</th></tr></thead><tbody>';
+  evs.forEach(function(e){
+    const cls = e.ok===true ? 'ev-ok' : (e.ok===false ? 'ev-bad' : 'ev-info');
+    const link = e.url ? ' <a class="link" href="'+e.url+'" target="_blank">↗</a>' : '';
+    html+='<tr><td class="ev-time">'+(e.ts||'')+'</td>'+
+          '<td><span class="ev-store">'+(e.storeName||e.store||'')+'</span></td>'+
+          '<td>'+(e.item||'')+link+'</td>'+
+          '<td class="'+cls+'">'+(e.action||'')+'</td>'+
+          '<td style="color:#8b93a1">'+(e.detail||'')+'</td></tr>';
+  });
+  html+='</tbody></table>';
+  cards.innerHTML=html;
+}
+
 function render(state){
   lastState = state;
+  const cardsEl=document.getElementById('cards');
+  if(cardsEl) cardsEl.style.display = (activeTab==='log') ? 'block' : 'grid';
   if(Array.isArray(state.disabled)) disabledSet = new Set(state.disabled);
+  if(activeTab === 'log'){ renderLog(state); return; }
   if(activeTab === 'tcsb'){ renderTcsb(state); return; }
   if(activeTab === 'momo'){ renderMomo(state); return; }
   if(activeTab === 'eslite'){ renderEslite(state); return; }

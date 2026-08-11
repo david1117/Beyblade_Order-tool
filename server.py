@@ -56,6 +56,43 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 STATE_LOCK = threading.Lock()
 STATE = {"targets": {}, "last_checked": None, "logged_in": None, "eslite": {}, "momo": {}, "tcsb": {}}
 
+# ---------- 動作紀錄：每次偵測到/加入/失敗都留下時間戳 ----------
+# 目的：事後可以確認「到底有沒有成功搶到」，不會錯過了卻不知道。
+EVENTS_PATH = HERE / "events.jsonl"
+EVENTS_LOCK = threading.Lock()
+EVENTS: list = []          # 最近 300 筆（給儀表板用）
+EVENTS_MAX = 300
+
+STORE_LABEL = {"funbox": "Funbox", "eslite": "誠品", "momo": "momo", "tcsb": "墊腳石"}
+
+
+def log_event(store: str, item: str, action: str, ok=None, detail: str = "", url: str = "") -> None:
+    """記一筆動作。action 例如：偵測到有貨 / 已加入購物車 / 加入失敗 / 已開商品頁。"""
+    ev = {
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "store": store, "storeName": STORE_LABEL.get(store, store),
+        "item": item, "action": action,
+        "ok": ok, "detail": detail, "url": url,
+    }
+    with EVENTS_LOCK:
+        EVENTS.append(ev)
+        del EVENTS[:-EVENTS_MAX]
+        try:
+            with EVENTS_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+
+def load_events() -> None:
+    """啟動時把最近的紀錄讀回來，關掉重開也看得到之前發生什麼。"""
+    global EVENTS
+    try:
+        lines = EVENTS_PATH.read_text(encoding="utf-8").splitlines()[-EVENTS_MAX:]
+        EVENTS = [json.loads(x) for x in lines if x.strip()]
+    except Exception:
+        EVENTS = []
+
 
 ESLITE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -924,6 +961,8 @@ def poll_loop(cfg: dict) -> None:
                         except Exception:
                             pass
                         _addlog(f"FUNBOX open-for-script {code} {url}")
+                        log_event("funbox", code, "已開商品頁（交給腳本加入）",
+                                  ok=True, detail="免 cookie 模式", url=url)
                 elif buyables:
                     cart_html = ""
                     try:
@@ -945,6 +984,9 @@ def poll_loop(cfg: dict) -> None:
                             STATE["targets"][code]["autoAdded"] = ok
                             STATE["targets"][code]["autoMsg"] = r.get("reason", "")
                         _addlog(f"AUTO-ADD {code} handle={handle} inCart={in_cart} -> ok={ok} reason={r.get('reason')}")
+                        log_event("funbox", code,
+                                  "已加入購物車" if ok else "加入失敗",
+                                  ok=ok, detail=str(r.get("reason", "")), url=url)
                         if ok:
                             added_any = True
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -962,6 +1004,8 @@ def poll_loop(cfg: dict) -> None:
                                 except Exception:
                                     pass
                                 _addlog(f"FUNBOX cookie 失效 → 改用腳本模式 {code}")
+                                log_event("funbox", code, "cookie 失效，改開商品頁",
+                                          ok=None, detail="請重新複製 cookie 或改用免 cookie 模式", url=url)
             # 有任何新放入就開一次購物車結帳頁
             if added_any and fc.get("open_checkout_after_add", True):
                 try:
@@ -1008,6 +1052,11 @@ def poll_loop(cfg: dict) -> None:
                             except Exception:
                                 pass
                         _addlog(f"ESLITE hit {name} off={off} auto_grab={auto_grab} url={s.get('url')}")
+                        log_event("eslite", name,
+                                  "已開商品頁（交給腳本加入）" if auto_grab else "偵測到有貨（未自動加入）",
+                                  ok=True if auto_grab else None,
+                                  detail=(s.get("name") or "") + (f"　NT${s.get('price')}" if s.get("price") else ""),
+                                  url=s.get("url", ""))
                     prev_esl[name] = s.get("buyable")
 
             # momo：序列查詢＋每筆間隔＋較慢節奏（同樣避免被限流）
@@ -1054,6 +1103,8 @@ def poll_loop(cfg: dict) -> None:
                             except Exception:
                                 pass
                             _addlog(f"MOMO arm {name} i_code={ic} sale={sale_iso}")
+                        log_event("momo", name, f"已布署準點搶（{sale_time} 開賣）",
+                                  ok=True, detail=f"正價 {s.get('price','?')}", url=url)
 
                     # B) 已直接開賣（無開賣橫幅、有貨）：偵測到可買就立刻開頁搶
                     if s.get("buyable") and ic and not prev_momo.get(name, False):
@@ -1069,6 +1120,10 @@ def poll_loop(cfg: dict) -> None:
                         if auto_grab:
                             momo_to_open.append((name, url))
                         _addlog(f"MOMO hit {name} i_code={ic} off={off} auto_grab={auto_grab}")
+                        log_event("momo", name,
+                                  "已開商品頁（交給腳本加入）" if auto_grab else "偵測到有貨（未自動加入）",
+                                  ok=True if auto_grab else None,
+                                  detail=f"正價 {s.get('price','?')}", url=url)
                     prev_momo[name] = s.get("buyable")
 
                 # 多本一起：逐一開商品頁加入購物車，最後一件才帶 mgcart=1 開購物車
@@ -1128,6 +1183,8 @@ def poll_loop(cfg: dict) -> None:
                         except Exception:
                             pass
                         _addlog(f"TCSB open-for-script {name} {st.get('url')}")
+                        log_event("tcsb", name, "已開商品頁（交給腳本加入）",
+                                  ok=True, detail="免 cookie 模式", url=st.get("url", ""))
 
                 # 有 cookie 時：直接用後端加入（最快），
                 # 只要「自動開著＋有貨＋不在購物車」就補加，不必等狀態變化。
@@ -1147,6 +1204,13 @@ def poll_loop(cfg: dict) -> None:
                                 STATE["tcsb"][nm]["autoMsg"] = res.get("reason", "")
                         if res.get("ok") and not res.get("skipped"):
                             newly.append(nm)
+                            log_event("tcsb", nm, "已加入購物車", ok=True,
+                                      detail=f"NT${info.get('price','?')}", url=info.get("url", ""))
+                        elif res.get("skipped"):
+                            pass                      # 已在購物車，不重複記錄
+                        elif not res.get("ok"):
+                            log_event("tcsb", nm, "加入失敗", ok=False,
+                                      detail=str(res.get("reason", "")), url=info.get("url", ""))
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             with STATE_LOCK:
                                 if nm in STATE["tcsb"]:
@@ -1265,6 +1329,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = dict(STATE)
             payload["disabled"] = sorted(DISABLED)
             payload["stores"] = dict(STORE_ON)
+            with EVENTS_LOCK:
+                payload["events"] = EVENTS[-120:][::-1]      # 最新的排前面
             self._send(200, json.dumps(payload, ensure_ascii=False))
         elif self.path.startswith("/api/health"):
             cfg = load_config()
@@ -1452,6 +1518,7 @@ def main() -> None:
     print("Loading config.json...", flush=True)
     cfg = load_config()
     load_disabled()
+    load_events()
     load_stores()
     port = int(cfg.get("server_port", 8787))
 
