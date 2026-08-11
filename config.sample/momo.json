@@ -1,0 +1,25 @@
+{
+  "_說明": "momo（momoshop.com.tw）。鎖定官方商品編號 i_code，避開溢價賣家。需搭配 momo_grab.user.js。",
+  "enabled": true,
+  "auto_grab": true,
+  "poll_interval_seconds": 60,
+  "_targets說明": "每筆 {\"name\":\"顯示名\",\"i_code\":\"商品編號\"}；i_code 也可直接貼商品網址。",
+  "targets": [
+    {
+      "name": "BX-50 天堂日輪 隨機強化組",
+      "i_code": "15462750"
+    },
+    {
+      "name": "BX-18 X 旋風發射器",
+      "i_code": "15477230"
+    },
+    {
+      "name": "Codex Vibe Coding 開發手冊",
+      "i_code": "15468181"
+    },
+    {
+      "name": "Claude Code Vibe Coding 開發手冊 第2版",
+      "i_code": "15341959"
+    }
+  ]
+}

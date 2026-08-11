@@ -1,0 +1,34 @@
+{
+  "_說明": "Funbox（shop.funbox.com.tw）。購物車在伺服器端，填 session_cookie 就能自動放入購物車。",
+  "enabled": true,
+  "auto_add": true,
+  "session_cookie": "",
+  "_cookie怎麼拿": "【可留空】留空就用『免 cookie 模式』：只要瀏覽器登入Funbox，偵測到有貨會自動開商品頁，由 Tampermonkey 腳本幫你加入購物車。想要更快（不用開瀏覽器）才填 cookie：登入後 F12 → Network → 重新整理 → 點第一筆 → 複製整行 cookie。",
+  "check_interval_seconds": 10,
+  "search_groups": [
+    "UX",
+    "BX",
+    "CX"
+  ],
+  "_targets說明": "一行一個型號或商品名，逗號分隔，最後一行不加逗號。",
+  "targets": [
+    "UX-04",
+    "UX-11",
+    "UX-03",
+    "UX-20",
+    "UX-21",
+    "BX-35",
+    "UX-15",
+    "UX-17",
+    "BX-09",
+    "CX-14",
+    "BX-10",
+    "BXG-57",
+    "BXG-70",
+    "BXG-32",
+    "BX-51",
+    "BX-18",
+    "BX-28",
+    "多美動物 AL-37 斑馬"
+  ]
+}

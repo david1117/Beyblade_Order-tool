@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>戰鬥陀螺上架監控</title>
+<style>
+  :root{ --bg:#0f1115; --card:#1a1d24; --muted:#8b93a1; --line:#2a2f3a;
+         --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --blue:#3b82f6; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:#e6e9ef}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0}
+  .meta{color:var(--muted);font-size:13px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .wrap{padding:18px 22px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px}
+  .model{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .title{color:var(--muted);font-size:13px;min-height:18px;line-height:1.4}
+  .badge{align-self:flex-start;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px}
+  .b-off{background:#2a2f3a;color:#9aa3b2}
+  .b-buy{background:rgba(34,197,94,.15);color:var(--green)}
+  .b-out{background:rgba(239,68,68,.15);color:var(--red)}
+  button.confirm{margin-top:auto;border:0;border-radius:9px;padding:11px;font-size:15px;font-weight:700;cursor:pointer;transition:.15s}
+  .ready{background:var(--green);color:#04210f}
+  .ready:hover{filter:brightness(1.08)}
+  .disabled{background:#242832;color:#5a6270;cursor:not-allowed}
+  #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#111827;border:1px solid var(--line);
+         padding:12px 18px;border-radius:10px;font-size:14px;opacity:0;transition:.25s;pointer-events:none;max-width:90vw}
+  #toast.show{opacity:1}
+  .ok{border-color:var(--green)} .err{border-color:var(--red)}
+  a.link{color:var(--blue);text-decoration:none;font-size:12px}
+  #banner{margin:0 22px;padding:0;font-size:14px;font-weight:600;border-radius:10px;overflow:hidden;transition:.2s}
+  #banner.show{padding:11px 16px;margin:14px 22px 0}
+  #banner.warn{background:rgba(239,68,68,.15);color:#fecaca;border:1px solid rgba(239,68,68,.4)}
+  #banner.good{background:rgba(34,197,94,.12);color:#bbf7d0;border:1px solid rgba(34,197,94,.35)}
+  .result{font-size:12px;min-height:16px;margin-top:2px}
+  .result.rok{color:var(--green)} .result.rerr{color:#fca5a5}
+  #controlbar{display:flex;align-items:center;gap:16px;margin:14px 22px 0;padding:12px 16px;
+              background:var(--card);border:1px solid var(--line);border-radius:12px;flex-wrap:wrap}
+  .selall{font-size:13px;color:#cbd2dd;display:flex;align-items:center;gap:6px;cursor:pointer}
+  #selinfo{font-size:13px}
+  button.batch{margin-left:auto;border:0;border-radius:9px;padding:11px 20px;font-size:15px;font-weight:700;cursor:pointer;transition:.15s}
+  button.batch.ready{background:var(--blue);color:#fff}
+  button.batch.ready.pulse{animation:pulse 1s ease-in-out infinite}
+  button.batch.ready:hover{filter:brightness(1.1)}
+  button.batch.disabled{background:#242832;color:#5a6270;cursor:not-allowed}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,.5)}50%{box-shadow:0 0 0 8px rgba(59,130,246,0)}}
+  .pick{display:flex;align-items:center;gap:6px;font-size:12px;color:#9aa3b2;cursor:pointer;user-select:none}
+  .pick input{width:15px;height:15px}
+  .mrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  button.autotgl{border:0;border-radius:7px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+  button.autotgl.on{background:rgba(34,197,94,.18);color:#22c55e}
+  button.autotgl.off{background:rgba(239,68,68,.20);color:#f87171}
+  .card.disabled{opacity:.72}
+  #tabs{display:flex;gap:8px;margin:14px 22px 0}
+  button.tab{border:0;border-radius:9px 9px 0 0;padding:9px 18px;font-size:14px;font-weight:700;cursor:pointer;background:#1a1d24;color:#8b93a1}
+  button.tab.active{background:var(--card);color:#e6e9ef;border-bottom:2px solid var(--blue)}
+  button.storebtn{margin-left:auto;border:0;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer}
+  button.storebtn.on{background:rgba(34,197,94,.18);color:#22c55e}
+  button.storebtn.off{background:rgba(239,68,68,.20);color:#f87171}
+  button.refresh{margin-left:8px;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
+                 background:var(--green);color:#04210f;cursor:pointer;transition:.15s}
+  button.refresh:hover{filter:brightness(1.08)}
+  button.refresh:disabled{background:#242832;color:#5a6270;cursor:default}
+  button.cartbtn{margin-left:auto;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
+                 background:var(--blue);color:#fff;cursor:pointer;transition:.15s}
+  button.cartbtn:hover{filter:brightness(1.1)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🌀 戰鬥陀螺上架監控</h1>
+  <span class="meta" id="clock">連線中…</span>
+  <span class="meta">（每 3 秒更新畫面；後端定時查商店）</span>
+  <button id="cartBtn" class="cartbtn">🛒 前往購物車</button>
+  <button id="refreshBtn" class="refresh">🔄 立刻偵測</button>
+</header>
+<div id="tabs">
+  <button class="tab active" data-tab="funbox">🧸 Funbox</button>
+  <button class="tab" data-tab="eslite">📚 誠品</button>
+  <button class="tab" data-tab="momo">🛍️ momo</button>
+  <button class="tab" data-tab="tcsb">🪜 墊腳石</button>
+  <button id="storeBtn" class="storebtn">偵測中</button>
+</div>
+<div id="banner"></div>
+<div id="controlbar">
+  <label class="selall"><input type="checkbox" id="selAll"> 全選可買</label>
+  <span id="selinfo" class="meta">尚未選取</span>
+  <button id="batchBtn" class="batch disabled" disabled>🛒 確認加入選取項目</button>
+</div>
+<div class="wrap" id="cards"></div>
+<div id="toast"></div>
+
+<script>
+let prevBuyable = {};
+let lastState = null;
+let autoAddOn = false;   // 由 /api/health 帶入；決定要不要顯示手動確認/勾選
+let disabledSet = new Set();   // 個別關閉自動加入（鍵是「商店:品項」，各分頁互不影響）
+function offKey(store, name){ return store + ':' + name; }
+function isOff(store, name){ return disabledSet.has(offKey(store, name)); }
+let activeTab = 'funbox';
+let prevEsl = {};
+let prevMomo = {};
+let prevTcsb = {};
+let storesState = {funbox:true, eslite:true, momo:true, tcsb:true};
+const results = {};
+
+function updateStoreBtn(){
+  const on = storesState[activeTab] !== false;
+  const b = document.getElementById('storeBtn');
+  b.className = 'storebtn ' + (on?'on':'off');
+  b.textContent = on ? '🟢 偵測中（點此停用）' : '⏸ 已停用偵測（點此啟用）';
+}
+async function toggleStore(){
+  const cur = storesState[activeTab] !== false;
+  storesState[activeTab] = !cur;
+  updateStoreBtn();
+  try{
+    await fetch('/api/store', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({store: activeTab, enabled: !cur})});
+  }catch(e){}
+}
+
+async function toggleAuto(store, model, enable){
+  const key = offKey(store, model);
+  if(enable) disabledSet.delete(key); else disabledSet.add(key);
+  if(lastState) render(lastState);            // 立即反映
+  try{
+    await fetch('/api/toggle', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({store:store, model:model, enabled:enable})});
+  }catch(e){}
+}
+
+function reasonMsg(d){
+  switch(d.reason){
+    case 'ok':         return {msg:'✅ 已加入購物車'+(d.cart_count!=null?'（購物車 '+d.cart_count+' 項）':''), ok:true};
+    case 'cart_unchanged': return {msg:'⚠ 送出成功但購物車沒增加 — cookie 可能與瀏覽器不同步，請重新複製 cookie', ok:false};
+    case 'no_cookie':  return {msg:'⚠ 未填 session_cookie（config.json），無法下單', ok:false};
+    case 'logged_out': return {msg:'⚠ cookie 已失效或未登入，請重新複製 cookie', ok:false};
+    case 'network':    return {msg:'❌ 連不到 funbox：'+(d.detail||''), ok:false};
+    default:           return {msg:'❌ 失敗 ('+(d.reason || ('HTTP '+(d.status||'?')))+')', ok:false};
+  }
+}
+function setResult(model, msg, ok){
+  results[model] = {msg, ok};
+  if(lastState) render(lastState);
+}
+function updateBanner(h){
+  const b = document.getElementById('banner');
+  if(!h){ b.className=''; b.textContent=''; return; }
+  var autoTxt = h.auto_add ? '　｜　⚡ 自動加入：開（偵測到就自動放入購物車並跳結帳）' : '';
+  if(!h.cookie_present){
+    b.className = 'show warn';
+    b.textContent = '⚠ 尚未填入 session_cookie（config.json）→ 卡片可變綠，但按下去無法下單。';
+  }else if(h.logged_in === false){
+    b.className = 'show warn';
+    b.textContent = '⚠ cookie 已失效或未登入 → 請重新複製 funbox 的 cookie 並重開。';
+  }else if(h.logged_in === true){
+    b.className = 'show good';
+    b.textContent = '✅ 已登入 funbox，cookie 有效，可直接下單。' + autoTxt;
+  }else{
+    b.className = 'show good';
+    b.textContent = '✅ session_cookie 已設定（登入狀態驗證中…）' + autoTxt;
+  }
+}
+
+// ---- selection (persisted) + batch add ----
+let selected = {};
+try{ selected = JSON.parse(localStorage.getItem('funbox_selected')||'{}'); }catch(e){ selected = {}; }
+function saveSel(){ try{ localStorage.setItem('funbox_selected', JSON.stringify(selected)); }catch(e){} }
+function toggleSel(model, on){
+  if(on) selected[model] = true; else delete selected[model];
+  saveSel(); if(lastState) render(lastState);
+}
+function buyableSelected(state){
+  return Object.values(state.targets||{}).filter(x => selected[x.model] && x.buyable && x.variant_id);
+}
+function updateControlBar(state){
+  // auto_add 開時整條批次列都藏起來（勾選/確認都用不到）
+  document.getElementById('controlbar').style.display = autoAddOn ? 'none' : '';
+  if(autoAddOn) return;
+  const buyableSel = buyableSelected(state);
+  const totalSel = Object.keys(selected).length;
+  document.getElementById('selinfo').textContent =
+    totalSel ? ('已選 '+totalSel+' 項，其中可買 '+buyableSel.length+' 項') : '尚未選取';
+  const btn = document.getElementById('batchBtn');
+  if(buyableSel.length > 0){ btn.className = 'batch ready pulse'; btn.disabled = false;
+    btn.textContent = '🛒 確認加入選取項目 ('+buyableSel.length+')'; }
+  else{ btn.className = 'batch disabled'; btn.disabled = true;
+    btn.textContent = '🛒 確認加入選取項目'; }
+}
+async function confirmBatch(){
+  if(!lastState) return;
+  const items = buyableSelected(lastState).map(x => ({model:x.model, variant_id:x.variant_id, qty:1}));
+  if(!items.length){ toast('沒有可加入的選取項目', 'err'); return; }
+  const btn = document.getElementById('batchBtn');
+  btn.disabled = true; btn.textContent = '加入中… ('+items.length+')';
+  try{
+    const r = await fetch('/api/add_batch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({items})
+    });
+    const d = await r.json();
+    let okc = 0;
+    (d.results||[]).forEach(res => {
+      const m = reasonMsg(res); results[res.model] = {msg:m.msg, ok:m.ok}; if(res.ok) okc++;
+    });
+    if(lastState) render(lastState);
+    if(okc > 0){ toast('✅ 已加入 '+okc+'/'+items.length+' 項，開結帳頁', 'ok'); window.open(d.cart_url, '_blank'); }
+    else{ toast('❌ 全部加入失敗，看卡片下方原因', 'err'); }
+  }catch(e){ toast('❌ 連不到本機伺服器', 'err'); }
+  btn.disabled = false; if(lastState) updateControlBar(lastState);
+}
+
+function toast(msg, kind){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + (kind||'');
+  setTimeout(()=>{ t.className = ''; }, 3500);
+}
+
+function beep(){
+  // 輕柔單音（音量小，不吵到旁人）；主要提醒靠彈窗＋桌面通知
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type='sine'; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+0.35);
+    o.start(); o.stop(ctx.currentTime+0.36);
+  }catch(e){}
+}
+function desktopNotify(title, body){
+  try{
+    if(('Notification' in window) && Notification.permission==='granted'){
+      new Notification(title, {body: body});
+    }
+  }catch(e){}
+}
+
+async function addToCart(model, variantId, btn){
+  if(!variantId){ setResult(model, '⚠ 抓不到 variant_id，改開商品頁手動加', false); return; }
+  btn.disabled = true; btn.textContent = '加入中…';
+  try{
+    const r = await fetch('/api/add', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({variant_id: variantId, qty: 1})
+    });
+    const d = await r.json();
+    const m = reasonMsg(d);
+    setResult(model, m.msg, m.ok);
+    if(d.ok){
+      toast('✅ ' + model + ' 已加入購物車，開結帳頁', 'ok');
+      window.open(d.cart_url, '_blank');
+    }else{
+      toast(m.msg, 'err');
+    }
+  }catch(e){
+    setResult(model, '❌ 連不到本機伺服器', false);
+  }
+  btn.disabled = false; btn.textContent = '確認加入購物車';
+}
+
+function renderEslite(state){
+  const cards = document.getElementById('cards');
+  document.getElementById('controlbar').style.display = 'none';
+  const banner = document.getElementById('banner');
+  banner.className = 'show good';
+  banner.textContent = '📚 誠品：偵測到有貨→自動開商品頁→腳本自動加入購物車→跳 step2 結帳（每件上限 1）。需裝 eslite_grab 腳本＋登入誠品。最後刷卡送出你本人按。關閉某件「自動」則只通知、不自動加入。';
+  const esl = state.eslite || {};
+  cards.innerHTML = '';
+  const vals = Object.values(esl);
+  if(!vals.length){
+    cards.innerHTML = '<div class="meta" style="padding:12px">尚未設定誠品商品（編輯 config.json 的 eslite.targets）</div>';
+    return;
+  }
+  vals.forEach(function(e){
+    const buyable = !!e.buyable;
+    const autoEnabled = !isOff('eslite', e.name);
+    if(buyable && !prevEsl[e.name]){ beep(); desktopNotify('🔔 誠品上架：'+e.name, (e.title||e.name)); }
+    prevEsl[e.name] = buyable;
+    const card = document.createElement('div'); card.className = 'card' + (autoEnabled?'':' disabled');
+    const badge = buyable ? '<span class="badge b-buy">🟢 有貨・可購買</span>'
+                          : '<span class="badge b-out">缺貨 / 貨到通知</span>';
+    const priceTxt = e.price ? ('　NT$'+e.price) : '';
+    const tglHtml = '<button class="autotgl '+(autoEnabled?'on':'off')+'">'+(autoEnabled?'自動:開':'自動:關')+'</button>';
+    const note = autoEnabled ? '' : '<div class="result rerr">⛔ 已停用自動加入（有貨也只通知）</div>';
+    card.innerHTML =
+      '<div class="mrow"><span class="model">'+e.name+'</span>'+tglHtml+'</div>' + badge +
+      '<div class="title">'+((e.title||'')+priceTxt)+'</div>' +
+      '<a class="link" href="'+e.url+'" target="_blank">前往商品頁 ↗</a>' + note;
+    card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('eslite', e.name, !autoEnabled));
+    cards.appendChild(card);
+  });
+}
+
+function renderMomo(state){
+  const cards=document.getElementById('cards');
+  document.getElementById('controlbar').style.display='none';
+  const banner=document.getElementById('banner'); banner.className='show good';
+  banner.textContent='🛍️ momo：鎖定官方指定商品（i_code）。有開賣時間→開賣前準點搶；已開賣→立即搶。需裝 momo_grab 腳本(v1.3)＋登入 momo。刷卡送出你本人按。';
+  const mo=state.momo||{}; cards.innerHTML='';
+  const vals=Object.values(mo);
+  if(!vals.length){ cards.innerHTML='<div class="meta" style="padding:12px">尚未設定 momo 商品。把 momo 商品網址給 Claude，會自動加入 config 的 momo.targets（i_code）。</div>'; return; }
+  vals.forEach(function(m){
+    const buyable=!!m.buyable;
+    const autoEnabled=!isOff('momo', m.name);
+    if(buyable && !prevMomo[m.name]){ beep(); desktopNotify('🔔 momo 開賣：'+m.name, m.name); }
+    prevMomo[m.name]=buyable;
+    const card=document.createElement('div'); card.className='card'+(autoEnabled?'':' disabled');
+    const badge = buyable ? '<span class="badge b-buy">🟢 已開賣・可搶</span>'
+                 : (m.sale_time ? '<span class="badge b-off">⏰ 預售 '+m.sale_time+' 開賣</span>'
+                                : '<span class="badge b-off">未開賣 / 缺貨</span>');
+    const tglHtml='<button class="autotgl '+(autoEnabled?'on':'off')+'">'+(autoEnabled?'自動:開':'自動:關')+'</button>';
+    const note = autoEnabled ? '' : '<div class="result rerr">⛔ 已停用自動搶（只通知）</div>';
+    const link = m.i_code
+      ? '<a class="link" href="https://www.momoshop.com.tw/goods/GoodsDetail.jsp?i_code='+m.i_code+'" target="_blank">開商品頁 ↗</a>'
+      : '<a class="link" href="'+(m.url||'#')+'" target="_blank">開商品頁 ↗</a>';
+    const priceTxt = m.price ? ('正價 NT$'+m.price) : '';
+    card.innerHTML='<div class="mrow"><span class="model">'+m.name+'</span>'+tglHtml+'</div>'+badge+
+      '<div class="title" style="color:#8b93a1">'+priceTxt+(m.i_code?'　｜　i_code '+m.i_code:'')+'</div>'+link+note;
+    card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('momo', m.name, !autoEnabled));
+    cards.appendChild(card);
+  });
+}
+
+function renderTcsb(state){
+  const cards=document.getElementById('cards');
+  document.getElementById('controlbar').style.display='none';
+  const banner=document.getElementById('banner'); banner.className='show good';
+  banner.textContent='🪜 墊腳石：用關鍵字偵測（走官方搜尋 API）。有貨會通知＋自動開商品頁；加入購物車與結帳由你自己按。也可在 config 填商品網址精準鎖定單一商品。';
+  const to=state.tcsb||{}; cards.innerHTML='';
+  const vals=Object.values(to);
+  if(!vals.length){ cards.innerHTML='<div class="meta" style="padding:12px">尚未設定墊腳石商品。把 www.tcsb.com.tw 的商品網址給 Claude，會自動加入 config 的 tcsb.targets。</div>'; return; }
+  vals.forEach(function(c){
+    const buyable=!!c.buyable;
+    const autoEnabled=!isOff('tcsb', c.name);
+    if(buyable && !prevTcsb[c.name]){ beep(); desktopNotify('🔔 墊腳石有貨：'+c.name, c.title||c.name); }
+    prevTcsb[c.name]=buyable;
+    const card=document.createElement('div'); card.className='card'+(autoEnabled?'':' disabled');
+    const badge = buyable ? '<span class="badge b-buy">🟢 有貨・可購買</span>'
+                          : '<span class="badge b-out">缺貨 / 貨到通知</span>';
+    const tglHtml='<button class="autotgl '+(autoEnabled?'on':'off')+'">'+(autoEnabled?'自動:開':'自動:關')+'</button>';
+    const note = autoEnabled ? '' : '<div class="result rerr">⛔ 已停用自動開頁（有貨也只通知）</div>';
+    const priceTxt = c.price ? ('售價 NT$'+c.price) : '';
+    card.innerHTML='<div class="mrow"><span class="model">'+c.name+'</span>'+tglHtml+'</div>'+badge+
+      '<div class="title" style="color:#8b93a1">'+(c.title||'')+'</div>'+
+      '<div class="title" style="color:#8b93a1">'+priceTxt+(c.code?'　｜　條碼 '+c.code:'')+'</div>'+
+      '<a class="link" href="'+(c.url||'#')+'" target="_blank">前往商品頁 ↗</a>'+note;
+    card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('tcsb', c.name, !autoEnabled));
+    cards.appendChild(card);
+  });
+}
+
+function render(state){
+  lastState = state;
+  if(Array.isArray(state.disabled)) disabledSet = new Set(state.disabled);
+  if(activeTab === 'tcsb'){ renderTcsb(state); return; }
+  if(activeTab === 'momo'){ renderMomo(state); return; }
+  if(activeTab === 'eslite'){ renderEslite(state); return; }
+  document.getElementById('clock').innerHTML =
+    '<span class="dot" style="background:var(--green)"></span>最後查詢 ' + (state.last_checked||'--');
+  const cards = document.getElementById('cards');
+  const targets = state.targets || {};
+  cards.innerHTML = '';
+  Object.values(targets).forEach(t=>{
+    // beep when a model flips from not-buyable to buyable (extra alert if selected)
+    if(t.buyable && !prevBuyable[t.model]){
+      beep();
+      desktopNotify('🔔 Funbox 上架：'+t.model, (t.title||t.model)+' — 已自動加入購物車，快去結帳！');
+      toast('🔔 上架：'+t.model, 'ok');
+    }
+    prevBuyable[t.model] = t.buyable;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    let badge = '<span class="badge b-off">未上架</span>';
+    if(t.listed && t.buyable) badge = '<span class="badge b-buy">🟢 上架・可購買</span>';
+    else if(t.listed && !t.buyable) badge = '<span class="badge b-out">售完 / 無法購買</span>';
+
+    const canBuy = t.listed && t.buyable && t.variant_id;
+    const btnCls = canBuy ? 'confirm ready' : 'confirm disabled';
+    const btnTxt = canBuy ? '確認加入購物車' : '尚無法購買';
+    const link = t.url ? '<a class="link" href="'+t.url+'" target="_blank">開商品頁 ↗</a>' : '';
+
+    const res = results[t.model];
+    const autoEnabled = !isOff('funbox', t.model);
+    if(!autoEnabled) card.className += ' disabled';
+
+    let autoNote = '';
+    if(!autoEnabled) autoNote = '<div class="result rerr">⛔ 已停用自動加入（有貨也不會放入）</div>';
+    else if(t.autoAdded) autoNote = '<div class="result rok">⚡ 已自動加入購物車'+(t.autoAddedAt?'　'+t.autoAddedAt:'')+'，去結帳付款</div>';
+    else if(autoAddOn && canBuy) autoNote = '<div class="result rok">🟢 可購買・自動加入中…</div>';
+
+    // 每張卡的「自動加入 開/關」切換鈕
+    const tglHtml = '<button class="autotgl '+(autoEnabled?'on':'off')+'">'+(autoEnabled?'自動:開':'自動:關')+'</button>';
+
+    // auto_add 開時隱藏勾選框與確認鈕；關時保留手動操作
+    const pickHtml = autoAddOn ? '' : '<label class="pick"><input type="checkbox" '+(selected[t.model]?'checked':'')+'> 要買（加入批次）</label>';
+    const btnHtml = autoAddOn ? '' : '<button class="buybtn '+btnCls+'" '+(canBuy?'':'disabled')+'>'+btnTxt+'</button>';
+
+    card.innerHTML =
+      '<div class="mrow"><span class="model">'+t.model+'</span>'+tglHtml+'</div>' +
+      pickHtml + badge +
+      '<div class="title">'+(t.title||'&nbsp;')+'</div>' +
+      link + btnHtml +
+      '<div class="result '+(res?(res.ok?'rok':'rerr'):'')+'">'+(res?res.msg:'')+'</div>' +
+      autoNote;
+
+    card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('funbox', t.model, !autoEnabled));
+    if(!autoAddOn){
+      const pk = card.querySelector('.pick input');
+      if(pk) pk.addEventListener('change', ev=>toggleSel(t.model, ev.target.checked));
+      if(canBuy){
+        const bb = card.querySelector('button.buybtn');
+        if(bb) bb.addEventListener('click', ev=>addToCart(t.model, t.variant_id, ev.target));
+      }
+    }
+    cards.appendChild(card);
+  });
+  updateControlBar(state);
+}
+
+async function tick(){
+  try{
+    const [s, h] = await Promise.all([
+      fetch('/api/status').then(r=>r.json()),
+      fetch('/api/health').then(r=>r.json()).catch(()=>null)
+    ]);
+    autoAddOn = !!(h && h.auto_add);
+    if(s && s.stores){ storesState = s.stores; updateStoreBtn(); }
+    render(s);
+    if(activeTab === 'funbox') updateBanner(h);
+  }catch(e){
+    document.getElementById('clock').innerHTML =
+      '<span class="dot" style="background:var(--red)"></span>伺服器未連線';
+  }
+}
+// momo 已改版：購物車是登入後才有的動態頁，沒有可直接連的靜態網址，
+// 舊的 cart2000/CartMain.jsp 會 404。改開 momo 首頁，登入後點右上購物車即進。
+const CART_URL = { funbox: 'https://shop.funbox.com.tw/cart', eslite: 'https://www.eslite.com/cart/step2', momo: 'https://www.momoshop.com.tw/main/Main.jsp', tcsb: 'https://www.tcsb.com.tw/checkout/cart' };
+function updateCartBtn(){
+  var label = { funbox:'🛒 Funbox 購物車', eslite:'🛒 誠品購物車', momo:'🛒 開 momo（登入後點購物車）', tcsb:'🛒 墊腳石購物車' };
+  document.getElementById('cartBtn').textContent = label[activeTab] || label.funbox;
+}
+document.getElementById('cartBtn').addEventListener('click', function(){
+  window.open(CART_URL[activeTab] || CART_URL.funbox, '_blank');
+});
+document.querySelectorAll('.tab').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    activeTab = btn.getAttribute('data-tab');
+    document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b===btn));
+    updateCartBtn();
+    updateStoreBtn();
+    if(lastState) render(lastState);
+  });
+});
+document.getElementById('storeBtn').addEventListener('click', toggleStore);
+updateCartBtn();
+updateStoreBtn();
+document.getElementById('batchBtn').addEventListener('click', confirmBatch);
+document.getElementById('refreshBtn').addEventListener('click', async (ev)=>{
+  const b = ev.currentTarget;
+  b.disabled = true; const orig = b.textContent; b.textContent = '偵測中…';
+  try{ await fetch('/api/refresh', {method:'POST'}); }catch(e){}
+  // poll quickly for a few seconds so fresh results show right away
+  for(let i=0;i<10;i++){ await new Promise(r=>setTimeout(r,400)); await tick(); }
+  b.disabled = false; b.textContent = orig;
+});
+document.getElementById('selAll').addEventListener('change', ev=>{
+  if(!lastState) return;
+  const t = lastState.targets || {};
+  if(ev.target.checked){ Object.values(t).forEach(x=>{ if(x.buyable) selected[x.model]=true; }); }
+  else{ Object.values(t).forEach(x=>{ delete selected[x.model]; }); }
+  saveSel(); render(lastState);
+});
+
+// 請求桌面通知權限（讓你切到別的視窗也收得到上架通知）
+try{ if('Notification' in window && Notification.permission==='default') Notification.requestPermission(); }catch(e){}
+
+tick();
+setInterval(tick, 3000);
+</script>
+</body>
+</html>

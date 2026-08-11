@@ -1,0 +1,12 @@
+{
+  "_說明": "四家共用的設定。",
+  "server_port": 8787,
+  "popup_alert": true,
+  "open_checkout_after_add": true,
+  "push": {
+    "enabled": true,
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+  },
+  "_push說明": "手機推播（Telegram，可不填）。@BotFather 拿 token，@userinfobot 拿數字 id。"
+}
