@@ -1,0 +1,81 @@
+{
+  "manifest_version": 3,
+  "name": "戰鬥陀螺上架監控",
+  "version": "0.1.0",
+  "description": "盯 Funbox／誠品／momo／墊腳石 的上架狀況，有貨自動加入購物車並把結帳選項填好。最後送出訂單一律由你本人按。",
+  "permissions": [
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://shop.funbox.com.tw/*",
+    "https://www.eslite.com/*",
+    "https://holmes.eslite.com/*",
+    "https://athena.eslite.com/*",
+    "https://www.momoshop.com.tw/*",
+    "https://www.tcsb.com.tw/*",
+    "https://mfme.map.com.tw/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "戰鬥陀螺上架監控",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://shop.funbox.com.tw/products/*",
+        "https://shop.funbox.com.tw/cart*",
+        "https://shop.funbox.com.tw/carts/*"
+      ],
+      "js": [
+        "content/funbox.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.eslite.com/product/*",
+        "https://www.eslite.com/cart/step2*"
+      ],
+      "js": [
+        "content/eslite.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.momoshop.com.tw/goods/GoodsDetail.jsp*",
+        "https://www.momoshop.com.tw/product/*"
+      ],
+      "js": [
+        "content/momo.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.tcsb.com.tw/*",
+        "https://mfme.map.com.tw/*"
+      ],
+      "js": [
+        "content/tcsb.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

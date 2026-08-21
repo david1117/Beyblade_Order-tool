@@ -1,0 +1,16 @@
+{
+  "_說明": "東海模型（ehobbyshop.com.tw）。targets 全部用名稱：已上架的會自動用站內搜尋找到並轉成盯庫存；還沒上架的盯「新商品上架」（sitemap）。",
+  "enabled": true,
+  "poll_interval_seconds": 600,
+  "_間隔警告": "600 秒＝10 分鐘。新品上架不是秒殺場，調太快只會增加被鎖 IP 的風險。",
+  "_targets說明": "一行一個型號或商品名片段（大小寫/空白不敏感），最後一行不加逗號。",
+  "targets": [
+    "UX-21",
+    "BX-35",
+    "TAKARA TOMY 戰鬥陀螺"
+  ],
+  "open_page": true,
+  "max_new_per_cycle": 40,
+  "request_gap_seconds": 1.5,
+  "watch_urls": []
+}

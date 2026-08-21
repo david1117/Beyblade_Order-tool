@@ -90,10 +90,13 @@
   <button class="tab" data-tab="eslite">📚 誠品</button>
   <button class="tab" data-tab="momo">🛍️ momo</button>
   <button class="tab" data-tab="tcsb">🪜 墊腳石</button>
+  <button class="tab" data-tab="ehobby">🏯 東海</button>
+  <button class="tab" data-tab="mm">🧩 M.M小舖</button>
   <button class="tab" data-tab="log">📋 動作紀錄</button>
   <button id="storeBtn" class="storebtn">偵測中</button>
 </div>
 <div id="banner"></div>
+<div id="cfgerr" style="display:none;margin:14px 22px 0;padding:11px 16px;border-radius:10px;background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.5);font-size:14px;font-weight:700"></div>
 <div id="controlbar">
   <label class="selall"><input type="checkbox" id="selAll"> 全選可買</label>
   <span id="selinfo" class="meta">尚未選取</span>
@@ -113,7 +116,9 @@ let activeTab = 'funbox';
 let prevEsl = {};
 let prevMomo = {};
 let prevTcsb = {};
-let storesState = {funbox:true, eslite:true, momo:true, tcsb:true};
+let prevEh = {};
+let prevMm = {};
+let storesState = {funbox:true, eslite:true, momo:true, tcsb:true, ehobby:true, mm:true};
 const results = {};
 
 function updateStoreBtn(){
@@ -371,6 +376,134 @@ function renderTcsb(state){
   });
 }
 
+function renderMm(state){
+  const cards=document.getElementById('cards');
+  document.getElementById('controlbar').style.display='none';
+  const banner=document.getElementById('banner'); banner.className='show good';
+  // M.M小舖是 BVSHOP／Vue 前端渲染：規格庫存只有瀏覽器渲染後才存在，
+  // server 用 HTTP 抓永遠看不到。所以這一分頁是「反向」的 —— 由 mm_grab.user.js 回報。
+  banner.textContent='🧩 M.M小舖：config/mm.json 只放型號，程式啟動自動開「1 個巡邏分頁」依序走訪所有目標 —— '
+    +'還沒找到的去搜尋、找到的讀規格庫存、有貨自動加入購物車。那個分頁保持開著即可（可縮到最小）。'
+    +'結帳與備註暗語由你自己填 —— 商品已經在購物車裡，不用跟時間賽跑。';
+  const to=state.mm||{}; cards.innerHTML='';
+  // 分頁被關掉時一鍵重開（server 會重新帶暗號開所有 config 目標）
+  if(Object.keys(to).length){
+    const bar=document.createElement('div');
+    bar.className='meta'; bar.style.cssText='padding:4px 12px 10px;grid-column:1/-1';
+    const rb=document.createElement('button');
+    rb.textContent='🔄 重新開啟巡邏分頁';
+    rb.style.cssText='padding:7px 14px;border:0;border-radius:8px;cursor:pointer;background:#1f6feb;color:#fff;font-weight:700';
+    rb.addEventListener('click', async ()=>{
+      rb.disabled=true; rb.textContent='開啟中…';
+      try{
+        const r=await fetch('/api/mm_open',{method:'POST'});
+        const d=await r.json();
+        rb.textContent='已開 '+(d.opened||[]).length+' 個分頁';
+      }catch(e){ rb.textContent='開啟失敗'; }
+      setTimeout(()=>{rb.disabled=false; rb.textContent='🔄 重新開啟巡邏分頁';}, 3000);
+    });
+    bar.appendChild(rb);
+    cards.appendChild(bar);
+  }
+  const vals=Object.values(to).sort((a,b)=>(b.lastSeen||'').localeCompare(a.lastSeen||''));
+  if(!vals.length){
+    cards.innerHTML='<div class="meta" style="padding:12px">尚未設定 M.M 目標。<br><br>'
+      +'1. 安裝 <b>mm_grab.user.js</b>（Tampermonkey）<br>'
+      +'2. 把商品加進 <b>config/mm.json</b> 的 targets：<br>'
+      +'<code>{"name":"CX-01 蒼龍勇氣","url":"https://mmtoyshop.com/item/...","spec":"不可搭"}</code><br>'
+      +'3. 重開程式 → 監看分頁會自動開、自動盯<br><br>'
+      +'（也可以不改 config，直接在商品頁右下角面板手動「開始監看」）</div>';
+    return;
+  }
+  const nowMs=Date.now();
+  vals.forEach(function(c){
+    const k=c.url||c.name;
+    const buyable=(c.buyable===true);
+    if(buyable && !prevMm[k]){ beep(); desktopNotify('🧩 M.M有貨：'+(c.name||''), (c.specText||'')+' 庫存 '+c.stock); }
+    prevMm[k]=buyable;
+    // lastSeen 是台灣本地時間字串，直接用 Date 解析（跟後端同一台機器）
+    const seen=c.lastSeen? new Date(c.lastSeen.replace(/-/g,'/')) : null;
+    const quietMin = seen? Math.round((nowMs-seen.getTime())/60000) : null;
+    const stale = c.watching && quietMin!==null && quietMin>10;
+    const card=document.createElement('div'); card.className='card'+(c.watching?'':' disabled');
+    let badge;
+    if(c.addedAt) badge='<span class="badge b-buy">🛒 已加入購物車 '+c.addedAt+'</span>';
+    else if(c.buyable===true) badge='<span class="badge b-buy">🟢 規格有貨（庫存 '+c.stock+'）</span>';
+    else if(c.buyable===false) badge='<span class="badge b-out">補貨中 / 庫存 '+(c.stock==null?'?':c.stock)+'</span>';
+    else if(c.phase==='searching') badge='<span class="badge b-out">🔍 搜尋商品頁中（可能還沒上架）</span>';
+    else if(!c.lastSeen) badge='<span class="badge b-out">等待腳本回報…</span>';
+    else badge='<span class="badge b-out">庫存讀不到</span>';
+    const watchTxt = c.watching
+      ? (stale? '<div class="result rerr">⚠ 顯示為監看中，但已經 '+quietMin+' 分鐘沒回報 —— 分頁可能被關掉或腳本停了</div>'
+              : '<div class="meta">👁 監看中</div>')
+      : '<div class="meta">⏸ 未監看</div>';
+    const tgt = c.targetSpec ? ('目標規格：'+c.targetSpec) : '目標規格：（用頁面上目前選中的）';
+    card.innerHTML='<div class="mrow"><span class="model" style="font-size:14px">'+(c.name||'').slice(0,52)+'</span></div>'+badge
+      +'<div class="title" style="color:#8b93a1">'+tgt+'</div>'
+      +(c.phase==='searching' ? '' : '<div class="title" style="color:#8b93a1">目前選中：'+(c.specText||'—')
+      +(c.specId?('　｜　spec '+c.specId):'')+'</div>')
+      +'<div class="title" style="color:#8b93a1">最後回報 '+(c.lastSeen||'—')+'</div>'
+      +'<a class="link" href="'+(c.url||'#')+'" target="_blank">前往商品頁 ↗</a>'+watchTxt;
+    cards.appendChild(card);
+  });
+}
+
+function renderEhobby(state){
+  const cards=document.getElementById('cards');
+  document.getElementById('controlbar').style.display='none';
+  const meta=state.ehobby_meta||{};
+  const banner=document.getElementById('banner');
+  banner.className='show ' + (meta.error ? 'warn' : 'good');
+  // 東海跟其他四家不同：陀螺類還沒上架、站內也搜不到，所以沒有「目標商品」可以盯。
+  // 這裡盯的是「有沒有新商品上架」。
+  let mtxt='🏯 東海模型：盯「新商品上架」（陀螺類還沒上架、站內也搜不到，沒有商品可以直接盯）。'
+         +'每 '+(meta.interval||600)+' 秒讀一次 sitemap 開頭；命中關鍵字才通知。東海沒有自動加入購物車。';
+  if(meta.error) mtxt='⚠ 東海掃描失敗：'+meta.error;
+  banner.textContent=mtxt;
+
+  const to=state.ehobby||{};
+  const vals=Object.values(to).sort((a,b)=>(b.foundAt||'').localeCompare(a.foundAt||''));
+
+  let head='<div class="meta" style="padding:10px 12px;grid-column:1/-1;line-height:1.9">'
+    +'最後掃描 <b>'+(meta.last_scan||'--')+'</b>'
+    +'　｜　已知最新商品 ID <b>'+(meta.known_max||'--')+'</b>'
+    +'　｜　上輪新品 <b>'+(meta.new_ids||0)+'</b> 個（檢查了 '+(meta.checked||0)+' 個標題）'
+    +(meta.watch?'　｜　補貨監看 <b>'+meta.watch+'</b> 件':'')
+    +'<br><span style="color:#8b93a1">'+(meta.note||'')+'</span>'
+    +(meta.backfill?('<br><span style="color:#8b93a1">'+meta.backfill+'</span>'):'')
+    +'<br><span style="color:#8b93a1">關鍵字與監看清單改 config/ehobby.json，改完重開程式。</span>'
+    +'</div>';
+
+  cards.innerHTML=head;
+  if(!vals.length){
+    cards.innerHTML=head+'<div class="meta" style="padding:12px;grid-column:1/-1">config/ehobby.json 的 targets 是空的。</div>';
+    return;
+  }
+  vals.forEach(function(c){
+    const buyable=(c.buyable===true);
+    const k='eh:'+c.name;
+    if(buyable && !prevEh[k]){ beep(); desktopNotify('🆕 東海：'+c.name, (c.title||'')+' 有貨・可購買'); }
+    prevEh[k]=buyable;
+    const isWatch=(c.kind==='watch');
+    const autoEnabled=!isOff('ehobby', c.name);
+    const card=document.createElement('div'); card.className='card'+(autoEnabled?'':' disabled');
+    let badge;
+    if(!c.listed)              badge='<span class="badge b-off">⏳ 尚未上架（監看中）</span>';
+    else if(c.buyable===true)  badge='<span class="badge b-buy">🟢 已上架・有貨</span>';
+    else if(c.buyable===false) badge='<span class="badge b-out">已上架・缺貨 / 貨到通知</span>';
+    else                       badge='<span class="badge b-out">已上架・庫存判斷不出來</span>';
+    const tglHtml='<button class="autotgl '+(autoEnabled?'on':'off')+'">'+(autoEnabled?'自動開頁:開':'自動開頁:關')+'</button>';
+    const priceTxt=c.price?('售價 NT$'+c.price):'';
+    const label=isWatch?('👁 '+(c.title||c.name).slice(0,20)):c.name;
+    card.innerHTML='<div class="mrow"><span class="model">'+label+'</span>'+tglHtml+'</div>'+badge
+      +'<div class="title" style="color:#e6e9ef">'+(c.title||(c.listed?'':'還沒有符合「'+c.name+'」的商品上架'))+'</div>'
+      +'<div class="title" style="color:#8b93a1">'+priceTxt+(c.foundAt?('　｜　偵測 '+c.foundAt):'')+'</div>'
+      +(c.url?('<a class="link" href="'+c.url+'" target="_blank">前往商品頁 ↗</a>'):'<span class="meta">（上架後這裡會出現商品連結）</span>');
+    card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('ehobby', c.name, !autoEnabled));
+    cards.appendChild(card);
+  });
+}
+
 function renderLog(state){
   const cards=document.getElementById('cards');
   document.getElementById('controlbar').style.display='none';
@@ -411,10 +544,19 @@ function renderLog(state){
 
 function render(state){
   lastState = state;
+  // config 檔壞掉（JSON 打錯字）→ 該店會無聲消失，這裡大聲顯示
+  const ce=document.getElementById('cfgerr');
+  if(ce){
+    const errs=state.config_errors||[];
+    ce.style.display = errs.length ? '' : 'none';
+    ce.textContent = errs.length ? ('⛔ '+errs.join('　｜　')) : '';
+  }
   const cardsEl=document.getElementById('cards');
   if(cardsEl) cardsEl.style.display = (activeTab==='log') ? 'block' : 'grid';
   if(Array.isArray(state.disabled)) disabledSet = new Set(state.disabled);
   if(activeTab === 'log'){ renderLog(state); return; }
+  if(activeTab === 'mm'){ renderMm(state); return; }
+  if(activeTab === 'ehobby'){ renderEhobby(state); return; }
   if(activeTab === 'tcsb'){ renderTcsb(state); return; }
   if(activeTab === 'momo'){ renderMomo(state); return; }
   if(activeTab === 'eslite'){ renderEslite(state); return; }
@@ -498,9 +640,9 @@ async function tick(){
 }
 // momo 已改版：購物車是登入後才有的動態頁，沒有可直接連的靜態網址，
 // 舊的 cart2000/CartMain.jsp 會 404。改開 momo 首頁，登入後點右上購物車即進。
-const CART_URL = { funbox: 'https://shop.funbox.com.tw/cart', eslite: 'https://www.eslite.com/cart/step2', momo: 'https://www.momoshop.com.tw/main/Main.jsp', tcsb: 'https://www.tcsb.com.tw/checkout/cart' };
+const CART_URL = { funbox: 'https://shop.funbox.com.tw/cart', eslite: 'https://www.eslite.com/cart/step2', momo: 'https://www.momoshop.com.tw/main/Main.jsp', tcsb: 'https://www.tcsb.com.tw/checkout/cart', ehobby: 'https://www.ehobbyshop.com.tw/checkout/cart', mm: 'https://mmtoyshop.com/cart' };
 function updateCartBtn(){
-  var label = { funbox:'🛒 Funbox 購物車', eslite:'🛒 誠品購物車', momo:'🛒 開 momo（登入後點購物車）', tcsb:'🛒 墊腳石購物車' };
+  var label = { funbox:'🛒 Funbox 購物車', eslite:'🛒 誠品購物車', momo:'🛒 開 momo（登入後點購物車）', tcsb:'🛒 墊腳石購物車', ehobby:'🛒 東海購物車', mm:'🛒 M.M小舖購物車' };
   document.getElementById('cartBtn').textContent = label[activeTab] || label.funbox;
 }
 document.getElementById('cartBtn').addEventListener('click', function(){

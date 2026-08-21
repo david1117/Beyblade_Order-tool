@@ -1,0 +1,17 @@
+{
+  "_說明": "M.M小舖（mmtoyshop.com）。config 只放型號：程式啟動自動開「1 個巡邏分頁」依序走訪所有目標（需安裝 mm_grab.user.js）。分頁保持開著即可（可縮到最小）。",
+  "enabled": true,
+  "auto_open": true,
+  "mode": "patrol",
+  "patrol_cycle_seconds": 300,
+  "patrol_gap_seconds": 4,
+  "default_spec": "不可搭",
+  "_default_spec說明": "預設盯的規格片段：「不可搭」會命中「預購-1個(不可搭其他預購) #不補」。",
+  "poll_interval_seconds": 120,
+  "search_interval_seconds": 600,
+  "_targets說明": "一行一個型號（純字串），最後一行不加逗號。",
+  "targets": [
+    "UX-21",
+    "BX-35"
+  ]
+}

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>戰鬥陀螺上架監控 — 設定</title>
+<style>
+  :root{ --bg:#0f1115; --card:#1a1d24; --muted:#8b93a1; --line:#2a2f3a;
+         --green:#22c55e; --red:#ef4444; --blue:#3b82f6; }
+  *{box-sizing:border-box}
+  body{margin:0;padding:22px;font-family:"Segoe UI",system-ui,sans-serif;
+       background:var(--bg);color:#e6e9ef;max-width:900px}
+  h1{font-size:19px;margin:0 0 4px}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .store{background:var(--card);border:1px solid var(--line);border-radius:12px;
+         padding:16px;margin-bottom:14px}
+  .row{display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap}
+  .name{font-size:16px;font-weight:700}
+  textarea{width:100%;min-height:110px;background:#0f1115;color:#e6e9ef;
+           border:1px solid var(--line);border-radius:8px;padding:10px;
+           font-family:Consolas,monospace;font-size:13px;line-height:1.6}
+  .hint{color:var(--muted);font-size:12px;margin-top:6px;line-height:1.6}
+  label.sw{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
+  button{border:0;border-radius:9px;padding:10px 20px;font-size:14px;
+         font-weight:700;cursor:pointer}
+  .save{background:var(--green);color:#04210f}
+  .now{background:var(--blue);color:#fff;margin-left:8px}
+  #status{margin-left:12px;font-size:13px;color:var(--muted)}
+  .bar{position:sticky;bottom:0;background:var(--bg);padding:14px 0;border-top:1px solid var(--line)}
+  .warn{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);
+        color:#fde68a;border-radius:10px;padding:11px 14px;font-size:13px;margin-bottom:16px;line-height:1.7}
+</style>
+</head>
+<body>
+  <h1>🌀 戰鬥陀螺上架監控</h1>
+  <div class="meta">偵測到有貨會通知，並自動開商品頁把商品加入購物車、把結帳選項填好。<b>最後送出訂單一律你本人按。</b></div>
+
+  <div class="warn">
+    不需要設定 cookie —— 外掛會直接用你在 Chrome 的登入狀態。<br>
+    請先在 Chrome 登入 Funbox、誠品、momo、墊腳石四個網站。<br>
+    背景偵測最快 1 分鐘一次（Chrome 對外掛的限制）；要秒級搶限量款，請用 Python 版。
+  </div>
+
+  <div id="stores"></div>
+
+  <div class="bar">
+    <button class="save" id="save">儲存設定</button>
+    <button class="now" id="now">立刻偵測一次</button>
+    <span id="status"></span>
+  </div>
+
+<script src="options.js"></script>
+</body>
+</html>

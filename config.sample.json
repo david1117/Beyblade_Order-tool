@@ -1,0 +1,130 @@
+{
+  "_readme": "Fill in your real details below. This file stays on YOUR computer only. Do not share it or paste it into chat.",
+  "targets": [
+    "UX-04",
+    "UX-11",
+    "UX-03",
+    "UX-20",
+    "UX-21",
+    "BX-35",
+    "UX-15",
+    "UX-17",
+    "BX-09",
+    "CX-14",
+    "BX-10",
+    "BXG-57",
+    "BXG-70",
+    "BXG-32",
+    "BX-51",
+    "BX-18",
+    "BX-28",
+    "多美動物 AL-37 斑馬"
+  ],
+  "_targets_note": "一行一個關鍵字字串即可（型號或商品名），逗號分隔。每個字串同時當作：商店搜尋字＋比對＋卡片顯示名稱。要多監控就多加一行；要測試就寫一個現在買得到的商品名。最後一行結尾不要加逗號。（進階：也可寫成 {\"code\":\"顯示名\",\"query\":\"搜尋字\",\"match\":\"標題需含字\"}。）",
+  "check_interval_seconds": 10,
+  "_interval_note": "每幾秒查一次商店。純 HTTP、零 AI 費用。搭配 search_groups 後每輪只打幾個請求，10 秒很安全；別低於 5。",
+  "search_groups": [
+    "UX",
+    "BX",
+    "CX"
+  ],
+  "_search_groups_note": "省請求用：型號代碼開頭符合這些關鍵字的（如 UX-04 → UX），就用該廣關鍵字一次搜回、大幅減少請求數。但『要不要加入購物車』仍精確比對你 targets 裡的完整型號，不會亂買。清單裡的自由字串（如商品全名）不受影響、各自搜尋。",
+  "search_query": "UX",
+  "_query_note": "Broad keyword sent to the shop search so all UX items show up in one request. The script then matches the exact codes in 'targets'.",
+  "notify": {
+    "sound": true,
+    "desktop_popup": true,
+    "open_browser_on_hit": true
+  },
+  "_notify_note": "When a target is detected: play a sound, show a desktop popup, and auto-open the product page in your browser so you can check out fast.",
+  "eslite": {
+    "enabled": true,
+    "auto_grab": true,
+    "targets": [
+      "UX-04",
+      "UX-11",
+      "UX-03",
+      "UX-20",
+      "UX-21",
+      "BX-35",
+      "UX-15",
+      "UX-17",
+      "BX-09",
+      "CX-14",
+      "BX-10",
+      "BXG-57",
+      "BXG-70",
+      "BXG-32",
+      "BX-51",
+      "BX-18",
+      "BX-28",
+      "鬼滅之刃 1"
+    ]
+  },
+  "_eslite_note": "誠品線上偵測分頁（只偵測+通知，不自動加入購物車）。跟 funbox 一樣一行一個關鍵字字串。注意：誠品是綜合書店，關鍵字要夠精確（例如寫『戰鬥陀螺 UX-04』而不是只寫『UX-04』，否則會搜到一堆無關的書）。有貨（可加入購物車）時會跳通知，你點連結去誠品自己加入結帳。進階可寫 {\"name\":\"顯示名\",\"query\":\"搜尋字\",\"match\":\"商品名需含字\"}。",
+  "momo": {
+    "enabled": true,
+    "auto_grab": true,
+    "targets": [
+      {
+        "name": "BX-50 天堂日輪 隨機強化組",
+        "i_code": "15462750"
+      },
+      {
+        "name": "BX-18 X 旋風發射器",
+        "i_code": "15477230"
+      }
+    ]
+  },
+  "_momo_note": "momo 改成『鎖定官方指定商品 i_code』（不再關鍵字搜尋，避開溢價第三方賣家）。每筆填 {\"name\":\"顯示名\",\"i_code\":\"商品編號\"}；i_code 也可直接貼商品網址（含 i_code=xxx 或 /product/xxx）我會自動抽出。要新增就把 momo 商品網址給我。後端會抓該商品頁的正價、開賣時間、庫存：若有『M/D H:MM 開賣』橫幅＝官方預售，開賣前約 2 分鐘自動開頁＋帶開賣時間，交給 momo 腳本準點搶；若已直接開賣就立即開頁搶。前提：裝 momo_grab.user.js（v1.3）＋瀏覽器登入 momo。刷卡送出你本人按。",
+  "tcsb": {
+    "enabled": true,
+    "auto_grab": true,
+    "session_cookie": "",
+    "poll_interval_seconds": 60,
+    "skip_books": false,
+    "exclude": [],
+    "targets": [
+      "戰鬥陀螺收納箱",
+      "UX-04",
+      "UX-11",
+      "UX-03",
+      "UX-20",
+      "UX-21",
+      "BX-35",
+      "UX-15",
+      "UX-17",
+      "BX-09",
+      "CX-14",
+      "BX-10",
+      "BXG-57",
+      "BXG-70",
+      "BXG-32",
+      "BX-51",
+      "BX-18",
+      "BX-28",
+      "Claude Code Vibe Coding開發手冊(2版)",
+      "Codex Vibe Coding開發手冊"
+    ]
+  },
+  "_tcsb_note": "墊腳石購物網 www.tcsb.com.tw。跟 funbox／誠品一樣用關鍵字：一行一個字串（走官方搜尋 API /api/products，讀 is_saleable 判斷有沒有貨）。搶【還沒上架】的商品就用關鍵字——商品一上架、名稱含這個關鍵字就會被抓到並自動加入購物車。（進階：已上架且想精準鎖定某一件時，才用商品網址／條碼，或 {\"name\":\"顯示名\",\"query\":\"搜尋字\",\"match\":\"商品名需含字\"}。）skip_books=false 代表書籍也會偵測。exclude 可填商品名要排除的字。【自動加入購物車】墊腳石購物車在伺服器端，填入 session_cookie 後偵測到有貨就會自動放進購物車並開啟購物車頁（cookie 取得：登入墊腳石 → F12 → Network → 重新整理 → 點 www.tcsb.com.tw 那筆 → 複製 Request Headers 的整行 cookie；正確的會含 XSRF-TOKEN 與 _session）。結帳一律你自己按。",
+  "fast_cart": {
+    "enabled": true,
+    "auto_add": true,
+    "popup_alert": true,
+    "cookie_source": "auto",
+    "session_cookie": "",
+    "open_checkout_after_add": true,
+    "quantity": 1
+  },
+  "server_port": 8787,
+  "_server_note": "Local dashboard runs at http://localhost:<server_port>. Only reachable from your own computer.",
+  "push": {
+    "enabled": true,
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+  },
+  "_push_note": "手機推播（Telegram）。設定兩個值：(1) 在 Telegram 找 @BotFather → 傳 /newbot → 依指示命名 → 它給你一串 bot token，貼到 telegram_bot_token。(2) 找 @userinfobot 傳任意訊息 → 它回你的數字 Id，貼到 telegram_chat_id。之後商品一上架就會推播＋附『開商品頁準備結帳』按鈕。填好重開伺服器。",
+  "_fast_cart_note": "cookie_source: 'auto' = 程式自動從你的瀏覽器讀 funbox 登入 cookie（推薦，不用手動複製，也不會過期）。可設 'edge' 或 'chrome' 指定瀏覽器；設 'manual' 則改用下方 session_cookie（手動貼上的 Cookie 標頭字串）。前提：該瀏覽器要保持登入 funbox。加入購物車只搶位子，付款與送出訂單一律你自己來。",
+  "_checkout_note": "This tool secures the cart only. Store pickup on funbox is prepay (credit card / LINE Pay / Google Pay) - there is no cash-on-delivery for 超商 pickup. Card entry and final submit are always done by you."
+}

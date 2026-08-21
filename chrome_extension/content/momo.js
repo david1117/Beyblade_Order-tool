@@ -1,13 +1,7 @@
-// ==UserScript==
-// @name         momo 準點搶購（Beyblade 等限時開賣）
-// @namespace    funbox-tools.local
-// @version      2.6
-// @description  在 momo 商品頁設定開賣時間，準點自動「直接購買 / 放入購物車」，支援開賣前 N 秒預刷＋到整點才開火。支援儀表板 combo：?mgauto=1&mgtime=ISO 會自動填入開賣時間並準點搶；無 mgtime 則立即搶。付款與最後送出仍由你本人操作。
-// @match        https://www.momoshop.com.tw/goods/GoodsDetail.jsp*
-// @match        https://www.momoshop.com.tw/product/*
-// @run-at       document-start
-// @grant        unsafeWindow
-// ==/UserScript==
+/* 由 momo_grab.user.js 移植成 Chrome 外掛的 content script。
+   注入範圍改由 manifest.json 的 content_scripts 決定。
+   安全界線不變：不碰信用卡卡號，不會替你送出訂單。 */
+
 
 (function () {
   'use strict';

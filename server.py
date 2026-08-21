@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -45,6 +45,16 @@ except Exception:
 
 import monitor  # reuse build_search_url / fetch / parse_products / match_targets
 
+# 東海模型（ehobbyshop）—— 純抓取/解析層放在獨立檔，可離線測試（tests/test_ehobby.py）。
+# 檔案不在也不能讓整個程式開不起來，所以包起來。
+try:
+    import ehobby_core
+    HAS_EHOBBY = True
+except Exception as _e:
+    ehobby_core = None
+    HAS_EHOBBY = False
+    print(f"[警告] 載入 ehobby_core 失敗，東海分頁停用：{_e}")
+
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 DASHBOARD = HERE / "dashboard.html"
@@ -54,7 +64,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 STATE_LOCK = threading.Lock()
-STATE = {"targets": {}, "last_checked": None, "logged_in": None, "eslite": {}, "momo": {}, "tcsb": {}}
+STATE = {"targets": {}, "last_checked": None, "logged_in": None,
+         "eslite": {}, "momo": {}, "tcsb": {}, "ehobby": {}, "mm": {},
+         "ehobby_meta": {"last_scan": "", "known_max": 0, "new_ids": 0,
+                         "checked": 0, "keywords": [], "note": "尚未掃描"}}
 
 # ---------- 動作紀錄：每次偵測到/加入/失敗都留下時間戳 ----------
 # 目的：事後可以確認「到底有沒有成功搶到」，不會錯過了卻不知道。
@@ -63,7 +76,8 @@ EVENTS_LOCK = threading.Lock()
 EVENTS: list = []          # 最近 300 筆（給儀表板用）
 EVENTS_MAX = 300
 
-STORE_LABEL = {"funbox": "Funbox", "eslite": "誠品", "momo": "momo", "tcsb": "墊腳石"}
+STORE_LABEL = {"funbox": "Funbox", "eslite": "誠品", "momo": "momo",
+               "tcsb": "墊腳石", "ehobby": "東海", "mm": "M.M小舖"}
 
 
 def log_event(store: str, item: str, action: str, ok=None, detail: str = "", url: str = "") -> None:
@@ -456,7 +470,7 @@ DISABLED_LOCK = threading.Lock()
 DISABLED: set = set()
 
 
-STORES = ("funbox", "eslite", "momo", "tcsb")
+STORES = ("funbox", "eslite", "momo", "tcsb", "ehobby", "mm")
 
 
 def dis_key(store: str, name: str) -> str:
@@ -495,7 +509,8 @@ def save_disabled() -> None:
 # Per-store detection ON/OFF (persisted). Off = stop polling that store.
 STORES_PATH = HERE / "stores.json"
 STORE_LOCK = threading.Lock()
-STORE_ON = {"funbox": True, "eslite": True, "momo": True, "tcsb": True}
+STORE_ON = {"funbox": True, "eslite": True, "momo": True, "tcsb": True,
+            "ehobby": True, "mm": True}
 
 
 def load_stores() -> None:
@@ -518,11 +533,30 @@ def save_stores() -> None:
 CONFIG_DIR = HERE / "config"
 
 
+CONFIG_ERRORS: list = []       # 壞掉的 config 檔清單（顯示在儀表板最上方）
+
+
 def _read_json(path: Path, default=None):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {} if default is None else default
+
+
+def _read_cfg_file(fname: str):
+    """讀 config/ 下的檔案。檔案存在但 JSON 壞掉 → 記進 CONFIG_ERRORS 大聲顯示，
+    絕對不要默默當成空設定 —— mm.json 曾因一個多打的 { 讓整家店無聲消失。"""
+    p = CONFIG_DIR / fname
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        msg = f"config/{fname} 格式錯誤（該店設定全部失效）：{e}"
+        if msg not in CONFIG_ERRORS:
+            CONFIG_ERRORS.append(msg)
+            print(f"[警告] {msg}")
+        return {}
 
 
 def split_config_files(cfg: dict) -> None:
@@ -570,6 +604,38 @@ def split_config_files(cfg: dict) -> None:
             "_targets說明": "一行一個關鍵字；也可寫商品網址或條碼精準鎖定單一商品。",
             "targets": cfg.get("tcsb", {}).get("targets", []),
         },
+        "ehobby.json": {
+            "_說明": "東海模型（ehobbyshop.com.tw）。這家跟其他四家不一樣：陀螺類商品目前還沒上架，"
+                     "站內也搜不到，所以沒有『目標商品』可以盯 —— 改成盯「有沒有新商品上架」。",
+            "_做法": "每輪只讀 sitemap.xml 的開頭（新品排最前面），比對出比上次更新的商品 ID，"
+                     "只抓那幾個商品頁的前 8KB 拿標題，標題命中關鍵字才抓整頁看庫存。"
+                     "穩定狀態下每輪只有 1 個請求。",
+            "enabled": True,
+            "poll_interval_seconds": 600,
+            "_間隔警告": "600 秒＝10 分鐘。新品上架不是秒殺場，不需要更快；調太快只會增加被鎖 IP 的風險。",
+            "_keywords說明": "商品標題含任一關鍵字就通知你。大小寫不敏感。寧可寬一點，反正只是通知。",
+            "keywords": ["陀螺", "BEYBLADE", "TAKARA TOMY", "UX-", "BX-", "CX-", "BXG-"],
+            "open_page": True,
+            "_open_page說明": "命中時要不要自動幫你開商品頁。false = 只通知不開頁。",
+            "max_new_per_cycle": 40,
+            "request_gap_seconds": 1.5,
+            "_watch_urls說明": "已知商品想盯補貨的話，把商品網址貼進來，例如 "
+                               "https://www.ehobbyshop.com.tw/product/detail/2621339 。每輪會各查一次整頁。",
+            "watch_urls": [],
+        },
+        "mm.json": {
+            "_說明": "M.M小舖（mmtoyshop.com）。規格庫存只有瀏覽器渲染後才看得到，所以這家是"
+                     "「config 驅動、瀏覽器執行」：程式啟動時自動開每個目標的商品頁並帶暗號，"
+                     "mm_grab.user.js 看到暗號就自動選規格、自動開始監看。分頁要保持開著（可縮到最小）。",
+            "enabled": True,
+            "auto_open": True,
+            "_auto_open說明": "啟動時自動開監看分頁。false = 只在儀表板列出，分頁自己開。",
+            "poll_interval_seconds": 120,
+            "_間隔警告": "這是「瀏覽器分頁重新載入」的間隔，下限 30 秒。調太快只會增加被鎖 IP 的風險。",
+            "_targets說明": '每筆 {"name":"顯示名","url":"商品網址","spec":"要盯的規格文字（可只寫片段，例如 不可搭）"}。'
+                            'spec 留空 = 用頁面上目前選中的規格。',
+            "targets": [],
+        },
         "common.json": {
             "_說明": "四家共用的設定。",
             "server_port": cfg.get("server_port", 8787),
@@ -585,6 +651,37 @@ def split_config_files(cfg: dict) -> None:
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+EHOBBY_SEEN_PATH = HERE / "ehobby_seen.json"
+
+
+def ehobby_load_seen() -> int:
+    """讀「上次看過的最大商品 ID」。沒有檔案回 0 = 還沒建立基準線。"""
+    try:
+        return int(_read_json(EHOBBY_SEEN_PATH, {}).get("known_max", 0))
+    except Exception:
+        return 0
+
+
+def ehobby_save_seen(known_max: int) -> None:
+    try:
+        EHOBBY_SEEN_PATH.write_text(
+            json.dumps({"known_max": int(known_max),
+                        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                       ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def ensure_new_config_files() -> None:
+    """後來才加的商店，既有使用者的 config/ 已經存在，split_config_files 不會再跑，
+    所以缺的檔案要在這裡補上（不覆蓋既有檔案）。"""
+    if not CONFIG_DIR.exists():
+        return
+    if not (CONFIG_DIR / "ehobby.json").exists():
+        split_config_files({})      # 只會寫「不存在」的檔案，其他家不受影響
+
+
 def load_config() -> dict:
     """優先讀 config/ 資料夾（每家一個檔）；沒有就讀舊的 config.json 並自動拆分。"""
     legacy = _read_json(CONFIG_PATH) if CONFIG_PATH.exists() else {}
@@ -593,12 +690,16 @@ def load_config() -> dict:
             split_config_files(legacy)     # 第一次啟動：自動從舊檔拆出來，設定不會不見
         else:
             return legacy
+    ensure_new_config_files()
 
-    fb = _read_json(CONFIG_DIR / "funbox.json")
-    es = _read_json(CONFIG_DIR / "eslite.json")
-    mo = _read_json(CONFIG_DIR / "momo.json")
-    tc = _read_json(CONFIG_DIR / "tcsb.json")
-    cm = _read_json(CONFIG_DIR / "common.json")
+    CONFIG_ERRORS.clear()
+    fb = _read_cfg_file("funbox.json")
+    es = _read_cfg_file("eslite.json")
+    mo = _read_cfg_file("momo.json")
+    tc = _read_cfg_file("tcsb.json")
+    eh = _read_cfg_file("ehobby.json")
+    mm = _read_cfg_file("mm.json")
+    cm = _read_cfg_file("common.json")
 
     # 組回程式內部用的結構（其餘程式碼不用改）
     cfg = {
@@ -617,6 +718,8 @@ def load_config() -> dict:
         "eslite": es,
         "momo": mo,
         "tcsb": tc,
+        "ehobby": eh,
+        "mm": mm,
         "server_port": cm.get("server_port", 8787),
         "push": cm.get("push", {}),
         "notify": legacy.get("notify", {}),
@@ -822,6 +925,110 @@ def resolve_status(t: dict, products: list, session: requests.Session, variant_c
             "variant_id": vid or ""}
 
 
+MM_BASE = "https://mmtoyshop.com"
+MM_FOUND_PATH = HERE / "mm_found.json"
+MM_FOUND_LOCK = threading.Lock()
+
+
+def mm_load_found() -> dict:
+    try:
+        d = json.loads(MM_FOUND_PATH.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def mm_save_found(name: str, url: str) -> None:
+    with MM_FOUND_LOCK:
+        d = mm_load_found()
+        d[str(name)] = str(url)
+        try:
+            MM_FOUND_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                                     encoding="utf-8")
+        except Exception:
+            pass
+
+
+def normalize_mm(raw, default_spec: str = "") -> list:
+    """MM 目標：純字串（型號）或 {name, spec, url}。
+    有 url = 直接盯商品頁；沒 url = 先開搜尋頁讓腳本找商品在哪（順便當上架偵測）。"""
+    out = []
+    for t in (raw or []):
+        if isinstance(t, str):
+            n = t.strip()
+            if n:
+                out.append({"name": n, "spec": default_spec, "url": ""})
+        elif isinstance(t, dict):
+            n = str(t.get("name", "")).strip()
+            if n:
+                out.append({"name": n,
+                            "spec": str(t.get("spec", default_spec)).strip(),
+                            "url": str(t.get("url", "")).strip()})
+    return out
+
+
+def mm_arm_url(url: str, spec: str, interval: int) -> str:
+    """在商品網址上帶暗號給 mm_grab.user.js。spec 含 #（例如「#不補」），
+    一定要 percent-encode，否則 # 後面會被瀏覽器當成 fragment 吃掉。"""
+    q = f"mmauto=1&mmint={int(interval)}"
+    if spec:
+        q += "&mmspec=" + quote(spec, safe="")
+    return url + ("&" if "?" in url else "?") + q
+
+
+def mm_open_targets(cfg: dict) -> list:
+    """開所有已啟用的 MM 監看分頁。回開了哪些名字。
+    有 url 的目標直接開商品頁；只有型號的先開搜尋頁（keyword=型號 + mmfind 暗號），
+    由腳本在渲染後的搜尋結果裡找商品、自己跳進商品頁 —— 還沒上架就留在搜尋頁定時重找。"""
+    mcfg = cfg.get("mm", {})
+    interval = max(30, int(mcfg.get("poll_interval_seconds", 120)))
+    search_interval = max(300, int(mcfg.get("search_interval_seconds", 600)))
+    targets = normalize_mm(mcfg.get("targets", []), str(mcfg.get("default_spec", "")))
+    opened = []
+    # 巡邏模式（預設）：只開 1 個分頁，腳本自己依序走訪所有目標。
+    # 使用者不想開 17 個分頁 —— 這是對的，一台巡邏車就夠了。
+    if str(mcfg.get("mode", "patrol")) == "patrol":
+        pending = [t for t in targets if not is_off("mm", t["name"])]
+        if not pending:
+            return []
+        first = pending[0]["name"]
+        try:
+            webbrowser.open(f"{MM_BASE}/category?keyword=" + quote(first, safe="") +
+                            "&mmpatrol=1")
+            _addlog(f"MM open-patrol targets={len(pending)}")
+            log_event("mm", "巡邏分頁", "已開巡邏分頁（1 個分頁輪流走訪所有目標）",
+                      ok=None, detail=f"{len(pending)} 個目標", url=MM_BASE)
+            return ["巡邏分頁（" + str(len(pending)) + " 個目標）"]
+        except Exception:
+            return []
+    for t in targets:
+        name = t["name"]
+        if is_off("mm", name):
+            continue
+        try:
+            if t["url"]:
+                u = mm_arm_url(t["url"], t["spec"], interval)
+                u += "&mmname=" + quote(name, safe="")
+                action = "已開監看分頁（交給腳本盯規格）"
+            else:
+                u = (f"{MM_BASE}/category?keyword=" + quote(name, safe="") +
+                     "&mmfind=" + quote(name, safe="") +
+                     f"&mmauto=1&mmint={interval}&mmsint={search_interval}" +
+                     ("&mmspec=" + quote(t["spec"], safe="") if t["spec"] else "") +
+                     "&mmname=" + quote(name, safe=""))
+                action = "已開搜尋分頁（交給腳本找商品頁）"
+            webbrowser.open(u)
+            time.sleep(1.5)
+            opened.append(name)
+            _addlog(f"MM open {name} url={'item' if t['url'] else 'search'}")
+            log_event("mm", name[:40], action, ok=None,
+                      detail=f"規格 {t['spec'] or '（目前選中的）'}",
+                      url=t["url"] or f"{MM_BASE}/category?keyword={quote(name, safe='')}")
+        except Exception:
+            pass
+    return opened
+
+
 def poll_loop(cfg: dict) -> None:
     targets = normalize_targets(cfg.get("targets", []))
     interval = max(5, int(cfg.get("check_interval_seconds", 60)))
@@ -861,9 +1068,97 @@ def poll_loop(cfg: dict) -> None:
     tcsb_skip_books = bool(tcfg.get("skip_books", True))
     tcsb_exclude = [str(x) for x in tcfg.get("exclude", []) if str(x).strip()]
 
+    # 東海模型（ehobby）：沒有目標商品可盯（陀螺還沒上架、站內也搜不到），
+    # 改成盯「有沒有新商品上架」—— 讀 sitemap 開頭比對新 ID。
+    ehcfg = cfg.get("ehobby", {})
+    eh_on = bool(ehcfg.get("enabled", True)) and HAS_EHOBBY
+    # targets 兩種形式（跟 MM 一致）：
+    #   "UX-21"                          → 盯「新上架」（商品還不存在，掃 sitemap 比對標題）
+    #   {"name":"...","url":"...detail/2627680"} 或直接貼商品網址
+    #                                    → 商品已上架 → 每輪查那一頁的庫存（盯補貨）
+    # 使用者拿已上架的 TOMICA 測試時發現：舊商品 ID 比基準線小，「新上架」路線永遠掃不到 —— 就是這裡修的。
+    eh_keywords = []
+    eh_url_watch = []          # [(pid, 卡片名)]
+    for _t in (ehcfg.get("targets") or ehcfg.get("keywords") or []):
+        if isinstance(_t, dict):
+            _u = str(_t.get("url", ""))
+            _n = str(_t.get("name", "")).strip()
+            _m = re.search(r"/product/detail/(\d+)", _u)
+            if _m:
+                eh_url_watch.append((int(_m.group(1)), _n or f"商品 {_m.group(1)}"))
+            elif _n:
+                eh_keywords.append(_n)
+        else:
+            _st = str(_t).strip()
+            _m = re.search(r"ehobbyshop\.com\.tw/product/detail/(\d+)", _st)
+            if _m:
+                eh_url_watch.append((int(_m.group(1)), f"商品 {_m.group(1)}"))
+            elif _st:
+                eh_keywords.append(_st)
+    eh_interval = max(60.0, float(ehcfg.get("poll_interval_seconds", 600)))
+    eh_gap = max(0.0, float(ehcfg.get("request_gap_seconds", 1.5)))
+    eh_max_new = max(1, int(ehcfg.get("max_new_per_cycle", 40)))
+    eh_open = bool(ehcfg.get("open_page", True))
+    eh_known_max = ehobby_load_seen()
+    eh_session = None
+    eh_watch = list(eh_url_watch)
+    for u in ehcfg.get("watch_urls", []):
+        m = re.search(r"/product/detail/(\d+)", str(u))
+        if m:
+            eh_watch.append((int(m.group(1)), ""))
+    prev_eh_watch: dict = {}
+    eh_backfilled = False
+    if eh_on:
+        eh_session = requests.Session()
+        eh_session.headers.update({"User-Agent": ehobby_core.EHOBBY_UA,
+                                   "Accept-Language": "zh-TW,zh;q=0.9"})
+        with STATE_LOCK:
+            STATE["ehobby_meta"] = {
+                "last_scan": "", "known_max": eh_known_max, "new_ids": 0, "checked": 0,
+                "keywords": eh_keywords, "watch": len(eh_watch),
+                "interval": int(eh_interval),
+                "note": ("尚未掃描" if eh_known_max else
+                         "首次啟動：第一輪只建立基準線，不會通知舊商品")}
+            # 每個型號一張卡片（跟其他分頁一樣）：還沒上架也看得到自己在名單上
+            for kw in eh_keywords:
+                if kw not in STATE["ehobby"]:
+                    STATE["ehobby"][kw] = {
+                        "name": kw, "kind": "target", "listed": False,
+                        "buyable": None, "price": "", "title": "",
+                        "matched": [], "foundAt": "", "url": ""}
+            # 盯庫存的目標（已上架商品）也一張卡，開機就存在、第一輪就會查到狀態
+            for _pid, _wn in eh_watch:
+                _k = _wn or ("watch:" + str(_pid))
+                if _k not in STATE["ehobby"]:
+                    STATE["ehobby"][_k] = {
+                        "name": _wn or str(_pid), "kind": "watch", "id": _pid,
+                        "listed": True, "buyable": None, "price": "", "title": "",
+                        "matched": [], "foundAt": "",
+                        "url": ehobby_core.ehobby_product_url(_pid)}
+
+    # M.M小舖：config 驅動、瀏覽器執行。這裡只負責把目標種進 STATE（儀表板先有卡片）
+    # 並在啟動時開監看分頁；實際盯規格庫存的是 mm_grab.user.js，它會回報 /api/mm_report。
+    mmcfg = cfg.get("mm", {})
+    if mmcfg.get("enabled", True) and STORE_ON.get("mm", True):
+        mm_targets = normalize_mm(mmcfg.get("targets", []),
+                                  str(mmcfg.get("default_spec", "")))
+        with STATE_LOCK:
+            for t in mm_targets:
+                key = t["name"]          # 鍵用型號名稱；腳本回報會帶 cfgName 對回來
+                if key not in STATE["mm"]:
+                    STATE["mm"][key] = {
+                        "name": t["name"], "url": t["url"],
+                        "targetSpec": t["spec"], "configured": True,
+                        "phase": "watching" if t["url"] else "searching",
+                        "buyable": None, "stock": None, "watching": False,
+                        "specText": "", "lastSeen": "", "addedAt": ""}
+        if mmcfg.get("auto_open", True) and mm_targets:
+            threading.Thread(target=mm_open_targets, args=(cfg,), daemon=True).start()
+
     last_esl = 0.0
     last_momo = 0.0
     last_tcsb = 0.0
+    last_eh = 0.0
     forced = True   # 首輪立即查誠品/momo/墊腳石；之後「立刻偵測」也會強制查
     prev_added_fb: dict[str, bool] = {}   # 免 cookie 模式：已開過商品頁的型號
 
@@ -900,6 +1195,7 @@ def poll_loop(cfg: dict) -> None:
                 prev_esl.clear()
                 prev_momo.clear()
                 prev_tcsb.clear()
+                prev_eh_watch.clear()
 
             # funbox 偵測（分頁開關關閉就整段跳過）
             results = []
@@ -1099,7 +1395,7 @@ def poll_loop(cfg: dict) -> None:
                                 popup_alert(f"⏰ momo 即將開賣：{name}",
                                             f"{name}\n\n開賣時間：{sale_time}\n正價：{s.get('price','?')}\n\n已開商品頁，腳本會準點自動搶。")
                             try:
-                                webbrowser.open(f"{url}&mgauto=1&mgtime={sale_iso}")
+                                webbrowser.open(f"{url}&mgauto=1&mgcart=1&mgtime={sale_iso}")   # 搶到後自動開購物車
                             except Exception:
                                 pass
                             _addlog(f"MOMO arm {name} i_code={ic} sale={sale_iso}")
@@ -1204,18 +1500,24 @@ def poll_loop(cfg: dict) -> None:
                                 STATE["tcsb"][nm]["autoMsg"] = res.get("reason", "")
                         if res.get("ok") and not res.get("skipped"):
                             newly.append(nm)
+                            # autoAddedAt 原本被寫在失敗分支，導致 dashboard 的
+                            # 「⚡ 已自動加入購物車」永遠沒有時間戳。移到這裡才對。
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            with STATE_LOCK:
+                                if nm in STATE["tcsb"]:
+                                    STATE["tcsb"][nm]["autoAddedAt"] = ts
+                            _addlog(f"TCSB add-OK {nm} code={info['code']}")
                             log_event("tcsb", nm, "已加入購物車", ok=True,
                                       detail=f"NT${info.get('price','?')}", url=info.get("url", ""))
                         elif res.get("skipped"):
                             pass                      # 已在購物車，不重複記錄
                         elif not res.get("ok"):
+                            # 原本這裡寫 _addlog("TCSB added ...")，失敗卻印 "added"，
+                            # 8/18 追 419 時就是被這行誤導。改成明確的失敗訊息＋原因。
                             log_event("tcsb", nm, "加入失敗", ok=False,
                                       detail=str(res.get("reason", "")), url=info.get("url", ""))
-                            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            with STATE_LOCK:
-                                if nm in STATE["tcsb"]:
-                                    STATE["tcsb"][nm]["autoAddedAt"] = ts
-                            _addlog(f"TCSB added {nm} code={info['code']}")
+                            _addlog(f"TCSB add-FAILED {nm} code={info['code']} "
+                                    f"reason={res.get('reason','?')}")
 
                     # 有新加入的才開一次結帳頁（多商品也只開一次）
                     if newly:
@@ -1228,6 +1530,170 @@ def poll_loop(cfg: dict) -> None:
                             webbrowser.open(f"{TCSB_BASE}/checkout/onepage")
                         except Exception:
                             pass
+
+            # ---------------- 東海模型（ehobby）：新品上架偵測 ----------------
+            # 跟其他四家不同：這裡沒有「目標商品」，因為陀螺類還沒上架、站內也搜不到。
+            # 做法是盯 sitemap 的開頭（新品排最前面），比對出新的商品 ID。
+            # 穩定狀態每輪只有 1 個請求；只有標題命中關鍵字才會多抓那一頁。
+            now_ts = time.time()
+            do_eh = (eh_on and STORE_ON.get("ehobby", True)
+                     and (forced or now_ts - last_eh >= eh_interval))
+            if do_eh:
+                last_eh = now_ts
+                # ---- 開機補找（只跑一次）：型號目標可能是「已上架」的商品 ----
+                # 新上架掃描只看得到比基準線更新的 ID，舊商品永遠掃不到（使用者拿
+                # 已上架的 TOMICA 測試時抓到的洞）。所以先用站內搜尋把每個型號找一遍，
+                # 找到的轉成「盯庫存」模式；沒找到的維持「盯新上架」。
+                if not eh_backfilled:
+                    eh_backfilled = True
+                    _found_n = 0
+                    _bf_total = len(eh_keywords)
+                    _bf_started = time.time()
+                    _addlog(f"EHOBBY backfill start names={_bf_total}")
+                    for _bi, kw in enumerate(list(eh_keywords)):
+                        with STATE_LOCK:
+                            STATE["ehobby_meta"]["note"] = (
+                                f"開機補找中 {_bi + 1}/{_bf_total}：{kw}（已上架的會轉成盯庫存）")
+                        time.sleep(eh_gap)
+                        try:
+                            hit, rep = ehobby_core.find_by_name(eh_session, kw, gap=eh_gap)
+                        except Exception as _e:
+                            hit, rep = None, []
+                            _addlog(f"EHOBBY backfill error {kw}: {type(_e).__name__}: {_e}")
+                        if not hit:
+                            # 沒中也要留線索：每個格式的 HTTP 狀態與商品數
+                            _addlog("EHOBBY backfill miss " + kw + " " + "; ".join(
+                                f"{r['url'].split('tw/')[-1][:40]} http={r['http']} items={r['items']}"
+                                for r in rep))
+                            continue
+                        _found_n += 1
+                        eh_watch.append((hit["id"], kw))
+                        eh_keywords.remove(kw)          # 已上架 → 不用再盯新上架
+                        with STATE_LOCK:
+                            STATE["ehobby"][kw] = {
+                                "name": kw, "kind": "watch", "id": hit["id"],
+                                "listed": True, "buyable": None, "price": "",
+                                "title": hit["title"], "matched": [], "foundAt":
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "url": hit["url"]}
+                        _addlog(f"EHOBBY backfill found {kw} -> id={hit['id']} "
+                                f"via={[r['url'] for r in rep if r.get('matched')]}")
+                        log_event("ehobby", kw, "已在站內找到商品，改盯庫存", ok=True,
+                                  detail=hit["title"][:60], url=hit["url"])
+                    _addlog(f"EHOBBY backfill done found={_found_n}/{_bf_total} "
+                            f"took={int(time.time() - _bf_started)}s")
+                    with STATE_LOCK:
+                        # 放獨立欄位：note 每輪掃描會被覆寫，補找結果要一直看得到
+                        STATE["ehobby_meta"]["backfill"] = (
+                            f"開機補找：{_bf_total} 個名稱找到 {_found_n} 個已上架"
+                            + ("（其餘盯新上架）" if _found_n < _bf_total else "")
+                            + ("" if _found_n else
+                               " —— 一個都沒找到？開 /api/ehobby_find?q=名稱 看診斷"))
+
+                bootstrap = (eh_known_max <= 0)     # 第一次跑：只建立基準線，不通知舊品
+                hits, rep = ehobby_core.scan_once(
+                    eh_session, eh_known_max, eh_keywords,
+                    max_new=(0 if bootstrap else eh_max_new), gap=eh_gap)
+                if rep.get("new_max", 0) > eh_known_max:
+                    eh_known_max = rep["new_max"]
+                    ehobby_save_seen(eh_known_max)
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                note = ""
+                if rep.get("error"):
+                    note = "連線失敗：" + str(rep["error"])
+                    _addlog(f"EHOBBY scan error {rep['error']}")
+                elif bootstrap:
+                    note = f"已建立基準線（目前最新商品 ID {eh_known_max}），之後只通知比這更新的商品"
+                    _addlog(f"EHOBBY bootstrap known_max={eh_known_max}")
+                elif rep.get("capped"):
+                    note = (f"這輪新品 {rep['new_ids']} 個，只檢查了前 {rep['checked']} 個"
+                            f"（max_new_per_cycle 上限）；剩下的下一輪不會再看到，"
+                            f"要調高 config/ehobby.json 的 max_new_per_cycle")
+                    _addlog(f"EHOBBY capped new={rep['new_ids']} checked={rep['checked']}")
+                elif rep.get("truncated"):
+                    note = (f"sitemap 開頭 16KB 內全是新品 —— 可能還有沒看到的，"
+                            f"下一輪會再往前追")
+                else:
+                    note = (f"這輪新上架 {rep['new_ids']} 個商品，命中 {len(hits)} 個"
+                            if rep["new_ids"] else "這輪沒有新商品上架")
+                with STATE_LOCK:
+                    _bf_note = STATE["ehobby_meta"].get("backfill", "")
+                    STATE["ehobby_meta"] = {
+                        "backfill": _bf_note,
+                        "last_scan": now_str, "known_max": eh_known_max,
+                        "new_ids": rep.get("new_ids", 0), "checked": rep.get("checked", 0),
+                        "keywords": eh_keywords, "watch": len(eh_watch),
+                        "interval": int(eh_interval), "note": note,
+                        "error": rep.get("error") or ""}
+
+                for h in (hits if not bootstrap else []):
+                    key = str(h["id"])
+                    matched = h.get("matched", [])
+                    with STATE_LOCK:
+                        # 新上架命中 → 亮的是「那個型號自己的卡片」（跟其他分頁一致）
+                        for kw in matched:
+                            STATE["ehobby"][kw] = {
+                                "name": kw, "kind": "target", "id": h["id"],
+                                "listed": True, "buyable": h.get("buyable"),
+                                "price": h.get("price", ""), "title": h["title"],
+                                "matched": matched, "foundAt": now_str, "url": h["url"]}
+                    buy_txt = ("有貨" if h.get("buyable") is True else
+                               "缺貨/可設貨到通知" if h.get("buyable") is False else "庫存判斷不出來")
+                    send_push(cfg, f"🆕 東海新上架：{h['title'][:40]}",
+                              f"命中關鍵字 {'、'.join(h.get('matched', []))}\n"
+                              f"{buy_txt}" + (f"　NT${h['price']}" if h.get("price") else "") +
+                              f"\n偵測時間 {now_str}", h["url"])
+                    if cfg.get("fast_cart", {}).get("popup_alert", True):
+                        popup_alert(f"🆕 東海模型新上架：{'、'.join(h.get('matched', []))}",
+                                    h["title"] + f"\n\n{buy_txt}\n偵測時間：{now_str}\n\n"
+                                    "（東海沒有自動加入購物車，請自己開頁下單）")
+                    if eh_open and any(not is_off("ehobby", kw) for kw in (matched or [key])):
+                        try:
+                            webbrowser.open(h["url"])
+                            time.sleep(1.5)
+                        except Exception:
+                            pass
+                    _addlog(f"EHOBBY hit id={h['id']} matched={h.get('matched')} "
+                            f"buyable={h.get('buyable')} {h['title'][:60]}")
+                    log_event("ehobby", h["title"][:40] or key,
+                              "新上架" + ("・有貨" if h.get("buyable") is True else ""),
+                              ok=True if h.get("buyable") is True else None,
+                              detail="命中 " + "、".join(h.get("matched", [])) +
+                                     (f"　NT${h['price']}" if h.get("price") else ""),
+                              url=h["url"])
+
+                # 指定商品的庫存監看（targets 給網址的 + watch_urls）
+                for pid, wname in eh_watch:
+                    time.sleep(eh_gap)
+                    d = ehobby_core.check_watch(eh_session, pid)
+                    if not d:
+                        continue
+                    key = wname or ("watch:" + str(pid))
+                    with STATE_LOCK:
+                        STATE["ehobby"][key] = {
+                            "name": wname or (d.get("title") or str(pid)), "id": pid,
+                            "listed": True,
+                            "buyable": d.get("buyable"), "price": d.get("price", ""),
+                            "title": d.get("title", ""), "matched": [], "kind": "watch",
+                            "foundAt": now_str, "url": d["url"]}
+                    b = d.get("buyable") is True
+                    if b and not prev_eh_watch.get(pid, False):
+                        send_push(cfg, f"🔔 東海補貨：{(d.get('title') or '')[:40]}",
+                                  f"偵測時間 {now_str}", d["url"])
+                        if cfg.get("fast_cart", {}).get("popup_alert", True):
+                            popup_alert("🔔 東海模型補貨",
+                                        (d.get("title") or "") +
+                                        f"\n\n偵測時間：{now_str}\n\n快去下單。")
+                        if eh_open and not is_off("ehobby", key):
+                            try:
+                                webbrowser.open(d["url"])
+                            except Exception:
+                                pass
+                        _addlog(f"EHOBBY restock id={pid} {d.get('title','')[:60]}")
+                        log_event("ehobby", (d.get("title") or str(pid))[:40], "補貨・有貨",
+                                  ok=True, detail=(f"NT${d['price']}" if d.get("price") else ""),
+                                  url=d["url"])
+                    prev_eh_watch[pid] = b
 
             # background login check (once per cycle) so the banner is honest
             try:
@@ -1312,10 +1778,12 @@ def add_to_cart(cfg: dict, variant_id: str, qty: int):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", extra=None):
         b = body if isinstance(body, bytes) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -1328,6 +1796,7 @@ class Handler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 payload = dict(STATE)
             payload["disabled"] = sorted(DISABLED)
+            payload["config_errors"] = list(CONFIG_ERRORS)
             payload["stores"] = dict(STORE_ON)
             with EVENTS_LOCK:
                 payload["events"] = EVENTS[-120:][::-1]      # 最新的排前面
@@ -1379,6 +1848,87 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path.find("add=1") >= 0 and pid:
                     out["add_result"] = tcsb_add_to_cart(cfg, first["code"], 1)
             self._send(200, json.dumps(out, ensure_ascii=False, indent=2))
+        elif self.path.startswith("/api/mm_targets"):
+            # 巡邏分頁的任務清單。腳本用 fetch 讀（跨源 https→http://127.0.0.1），
+            # 要帶 CORS 標頭它才讀得到回應。內容只有型號與公開商品網址，無敏感資料。
+            cfg = load_config()
+            mcfg = cfg.get("mm", {})
+            found = mm_load_found()
+            tg = normalize_mm(mcfg.get("targets", []), str(mcfg.get("default_spec", "")))
+            items = []
+            with STATE_LOCK:
+                mm_state = {k: dict(v) for k, v in STATE["mm"].items()}
+            for t in tg:
+                if is_off("mm", t["name"]):
+                    continue
+                items.append({
+                    "name": t["name"], "spec": t["spec"],
+                    "url": t["url"] or found.get(t["name"], ""),
+                    "addedAt": mm_state.get(t["name"], {}).get("addedAt", ""),
+                })
+            self._send(200, json.dumps({
+                "targets": items,
+                "cycle_seconds": max(120, int(mcfg.get("patrol_cycle_seconds", 300))),
+                "gap_seconds": max(2, int(mcfg.get("patrol_gap_seconds", 4))),
+            }, ensure_ascii=False), extra={"Access-Control-Allow-Origin": "*"})
+        elif self.path.startswith("/api/ehobby_find"):
+            # 診斷用：http://localhost:8787/api/ehobby_find?q=TOMICA%20...
+            # 用站內搜尋實找一次，回報每個候選網址格式的結果 —— 找不到時先開這個看卡在哪。
+            from urllib.parse import parse_qs, urlparse as _up
+            q = (parse_qs(_up(self.path).query).get("q") or [""])[0]
+            if not q:
+                self._send(200, json.dumps({"用法": "/api/ehobby_find?q=商品名稱或型號"},
+                                           ensure_ascii=False, indent=2))
+                return
+            se = requests.Session()
+            se.headers.update({"User-Agent": ehobby_core.EHOBBY_UA,
+                               "Accept-Language": "zh-TW,zh;q=0.9"})
+            hit, rep = ehobby_core.find_by_name(se, q)
+            self._send(200, json.dumps({
+                "查詢": q, "找到": hit, "各格式嘗試結果": rep,
+                "說明": ("找到 → config 的 targets 放這個名稱就會自動盯庫存。"
+                         if hit else
+                         "沒找到：看上面哪個格式 items>0 但 matched=false（名稱片段對不上），"
+                         "或全部 items=0（搜尋格式都不對，把你在東海網站搜尋後的網址貼給 Claude）。")},
+                ensure_ascii=False, indent=2))
+        elif self.path.startswith("/api/ehobby_test"):
+            # 診斷用：在你自己電腦上打開 http://localhost:8787/api/ehobby_test
+            # 會實際打東海 3 個請求（sitemap 開頭 + 前 2 個商品的標題），確認你的 IP 通不通。
+            cfg = load_config()
+            ehcfg = cfg.get("ehobby", {})
+            kws = ehcfg.get("targets") or ehcfg.get("keywords") or []
+            out = {"has_module": HAS_EHOBBY, "known_max_saved": ehobby_load_seen(),
+                   "targets": kws,
+                   "poll_interval_seconds": ehcfg.get("poll_interval_seconds", 600)}
+            if not HAS_EHOBBY:
+                out["error"] = "ehobby_core.py 不在或載入失敗"
+                self._send(200, json.dumps(out, ensure_ascii=False, indent=2))
+                return
+            se = requests.Session()
+            se.headers.update({"User-Agent": ehobby_core.EHOBBY_UA,
+                               "Accept-Language": "zh-TW,zh;q=0.9"})
+            try:
+                code, text = ehobby_core._stream_head(se, ehobby_core.EHOBBY_SITEMAP, 16384)
+                out["sitemap_http"] = code
+                out["sitemap_bytes_read"] = len(text)
+                ids = ehobby_core.parse_ids(text)
+                out["sitemap_ids_in_window"] = len(ids)
+                out["newest_ids"] = ids[:5]
+                out["descending"] = bool(len(ids) > 1 and ids[0] > ids[-1])
+                samples = []
+                for pid in ids[:2]:
+                    time.sleep(1.5)
+                    t = ehobby_core.fetch_title(se, pid)
+                    samples.append({"id": pid, "title": t,
+                                    "matched": ehobby_core.match_targets(t or "", kws)})
+                out["sample_titles"] = samples
+                out["verdict"] = ("✅ 你的 IP 打得通，第五分頁可以正常運作"
+                                  if code in (200, 206) and ids else
+                                  f"⛔ 打不通（HTTP {code}）—— 換手機網路試試")
+            except Exception as e:
+                out["error"] = f"{type(e).__name__}: {e}"
+                out["verdict"] = "⛔ 連線失敗"
+            self._send(200, json.dumps(out, ensure_ascii=False, indent=2))
         elif self.path.startswith("/api/eslite_test"):
             # 診斷用：在你自己電腦上打開 http://localhost:8787/api/eslite_test
             # 會實際去誠品查每個目標，回傳原始結果，方便看「為何判成缺貨」。
@@ -1429,6 +1979,95 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_POST(self):
+        if self.path.startswith("/api/mm_report"):
+            # M.M小舖（mmtoyshop）的規格庫存只有瀏覽器渲染後才看得到 —— server 抓不到，
+            # 所以第六分頁反過來：由 mm_grab.user.js 主動回報，這裡只負責收下、顯示、推播。
+            # 腳本用 text/plain + no-cors 送（瀏覽器眼中的「簡單請求」，不會觸發 CORS 預檢）。
+            try:
+                p = self._read_json()
+            except Exception:
+                p = {}
+            key = str(p.get("cfgName") or p.get("pathname") or p.get("url") or "").strip()
+            if not key:
+                self._send(200, json.dumps({"ok": False, "reason": "no_key"}))
+                return
+            name = str(p.get("name") or key)[:120]
+            buyable = p.get("buyable")
+            event = str(p.get("event") or "check")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with STATE_LOCK:
+                prev = dict(STATE["mm"].get(key, {}))
+                STATE["mm"][key] = {
+                    "name": (prev.get("name") if prev.get("configured") else name) or name,
+                    "configured": prev.get("configured", False),
+                    "phase": p.get("phase") or prev.get("phase", "watching"),
+                    "url": p.get("url", ""), "prodId": p.get("prodId", ""),
+                    "targetSpec": p.get("targetSpec", ""), "specText": p.get("specText", ""),
+                    "specId": p.get("specId", ""), "stock": p.get("stock"),
+                    "buyable": buyable, "watching": bool(p.get("watching")),
+                    "options": p.get("options", []),
+                    "lastSeen": now_str, "event": event,
+                    "addedAt": p.get("addedAt") or prev.get("addedAt", ""),
+                }
+            cfg = load_config()
+            if event == "added":
+                _addlog(f"MM added {name} spec={p.get('specText')} stock={p.get('stock')}")
+                log_event("mm", name[:40], "已加入購物車", ok=True,
+                          detail=f"規格 {p.get('specText','')}　庫存 {p.get('stock')}",
+                          url=p.get("url", ""))
+                send_push(cfg, f"🛒 M.M小舖已加入購物車：{name[:40]}",
+                          f"規格 {p.get('specText','')}\n庫存 {p.get('stock')}\n"
+                          f"時間 {now_str}\n去結帳（預購品請先確認條款）",
+                          p.get("url", ""))
+                if cfg.get("fast_cart", {}).get("popup_alert", True):
+                    popup_alert("🛒 M.M小舖已加入購物車",
+                                f"{name}\n\n規格：{p.get('specText','')}\n"
+                                f"庫存：{p.get('stock')}\n時間：{now_str}\n\n"
+                                "結帳請你自己確認 —— 預購品有砍單／不可搭／不補的條款。")
+                try:
+                    webbrowser.open(f"{MM_BASE}/cart")
+                except Exception:
+                    pass
+            elif event == "found":
+                if p.get("url"):
+                    mm_save_found(key, str(p.get("url")).split("?")[0])
+                _addlog(f"MM found {key} -> {p.get('url','')}")
+                log_event("mm", key[:40], "已在搜尋結果找到商品頁", ok=True,
+                          detail=str(p.get("name", ""))[:60], url=p.get("url", ""))
+                send_push(cfg, f"🔎 M.M小舖找到商品：{key[:40]}",
+                          str(p.get("name", ""))[:80] + f"\n開始盯規格庫存",
+                          p.get("url", ""))
+            elif event in ("spec_missing", "give_up"):
+                _addlog(f"MM {event} {name}")
+                log_event("mm", name[:40],
+                          "找不到指定規格" if event == "spec_missing" else "已達重載上限，停止監看",
+                          ok=False, detail=str(p.get("targetSpec", "")), url=p.get("url", ""))
+                send_push(cfg, f"⚠ M.M小舖監看中斷：{name[:40]}",
+                          ("頁面上找不到規格「" + str(p.get("targetSpec", "")) + "」"
+                           if event == "spec_missing" else "已達重載上限，已自動停止"),
+                          p.get("url", ""))
+            elif buyable is True and prev.get("buyable") is not True:
+                _addlog(f"MM in-stock {name} spec={p.get('specText')} stock={p.get('stock')}")
+                log_event("mm", key[:40], "偵測到規格有貨", ok=True,
+                          detail=f"規格 {p.get('specText','')}　庫存 {p.get('stock')}",
+                          url=p.get("url", ""))
+                # 使用者要的：庫存 > 0 當下就通知，不用等加入購物車成功
+                send_push(cfg, f"🔔 M.M小舖規格有貨：{key[:40]}",
+                          f"規格 {p.get('specText','')}\n庫存 {p.get('stock')}\n"
+                          f"偵測時間 {now_str}\n巡邏腳本正在自動加入購物車",
+                          p.get("url", ""))
+                if cfg.get("fast_cart", {}).get("popup_alert", True):
+                    popup_alert(f"🔔 M.M小舖規格有貨：{key[:40]}",
+                                f"{name}\n\n規格：{p.get('specText','')}\n"
+                                f"庫存：{p.get('stock')}\n偵測時間：{now_str}\n\n"
+                                "巡邏腳本正在自動加入購物車，加入成功會再通知並開購物車頁。")
+            self._send(200, json.dumps({"ok": True}))
+            return
+        if self.path.startswith("/api/mm_open"):
+            cfg = load_config()
+            opened = mm_open_targets(cfg)
+            self._send(200, json.dumps({"ok": True, "opened": opened}, ensure_ascii=False))
+            return
         if self.path.startswith("/api/refresh"):
             REFRESH_EVENT.set()
             self._send(200, json.dumps({"ok": True}))
