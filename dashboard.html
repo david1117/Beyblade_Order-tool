@@ -53,17 +53,31 @@
   button.autotgl.on{background:rgba(34,197,94,.18);color:#22c55e}
   button.autotgl.off{background:rgba(239,68,68,.20);color:#f87171}
   .card.disabled{opacity:.72}
+  .card{position:relative}
+  button.rmv{position:absolute;top:6px;left:6px;width:20px;height:20px;border:0;border-radius:6px;
+             background:#242832;color:#8b93a1;font-size:12px;line-height:1;cursor:pointer;
+             opacity:.35;transition:.15s;z-index:2;padding:0}
+  .card:hover button.rmv{opacity:1}
+  button.rmv:hover{background:rgba(239,68,68,.25);color:#f87171}
+  button.prio{position:absolute;right:8px;bottom:8px;width:26px;height:26px;border-radius:50%;
+              border:1px solid var(--line);background:#242832;color:#8b93a1;
+              font:700 13px system-ui,sans-serif;cursor:pointer;z-index:2;padding:0;
+              display:flex;align-items:center;justify-content:center;opacity:.5;transition:.15s}
+  .card:hover button.prio{opacity:1}
+  button.prio.set{background:var(--blue);color:#fff;border-color:var(--blue);opacity:1;
+                  box-shadow:0 0 0 2px rgba(59,130,246,.25)}
+  button.prio:hover{opacity:1}
   #tabs{display:flex;gap:8px;margin:14px 22px 0}
   button.tab{border:0;border-radius:9px 9px 0 0;padding:9px 18px;font-size:14px;font-weight:700;cursor:pointer;background:#1a1d24;color:#8b93a1}
   button.tab.active{background:var(--card);color:#e6e9ef;border-bottom:2px solid var(--blue)}
-  button.storebtn{margin-left:auto;border:0;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer}
+  button.storebtn{border:0;border-radius:9px;padding:8px 16px;font-size:13px;font-weight:700;cursor:pointer}
   button.storebtn.on{background:rgba(34,197,94,.18);color:#22c55e}
   button.storebtn.off{background:rgba(239,68,68,.20);color:#f87171}
   button.refresh{margin-left:8px;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
                  background:var(--green);color:#04210f;cursor:pointer;transition:.15s}
   button.refresh:hover{filter:brightness(1.08)}
   button.refresh:disabled{background:#242832;color:#5a6270;cursor:default}
-  button.cartbtn{margin-left:auto;border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
+  button.cartbtn{border:0;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;
                  background:var(--blue);color:#fff;cursor:pointer;transition:.15s}
   button.cartbtn:hover{filter:brightness(1.1)}
   table.log{width:100%;border-collapse:collapse;font-size:13px}
@@ -82,18 +96,24 @@
   <h1>🌀 戰鬥陀螺上架監控</h1>
   <span class="meta" id="clock">連線中…</span>
   <span class="meta">（每 3 秒更新畫面；後端定時查商店）</span>
-  <button id="cartBtn" class="cartbtn">🛒 前往購物車</button>
+  <button id="bindBtn" class="cartbtn" style="margin-left:auto;background:#2a2f3a;color:#cbd2dd">🔗 綁定寄件信箱…</button>
+  <button id="mailBtn" class="cartbtn" style="margin-left:8px;background:rgba(59,130,246,.20);color:#93c5fd">📥 收信信箱…</button>
+  <button id="cartBtn" class="cartbtn" style="margin-left:8px">🛒 前往購物車</button>
   <button id="refreshBtn" class="refresh">🔄 立刻偵測</button>
 </header>
 <div id="tabs">
   <button class="tab active" data-tab="funbox">🧸 Funbox</button>
   <button class="tab" data-tab="eslite">📚 誠品</button>
-  <button class="tab" data-tab="momo">🛍️ momo</button>
   <button class="tab" data-tab="tcsb">🪜 墊腳石</button>
+  <button class="tab" data-tab="momo">🛍️ momo</button>
   <button class="tab" data-tab="ehobby">🏯 東海</button>
   <button class="tab" data-tab="mm">🧩 M.M小舖</button>
   <button class="tab" data-tab="log">📋 動作紀錄</button>
-  <button id="storeBtn" class="storebtn">偵測中</button>
+  <button id="fbModeBtn" class="storebtn" style="margin-left:auto;display:none"></button>
+  <button id="esModeBtn" class="storebtn" style="margin-left:auto;display:none"></button>
+  <button id="tcsbModeBtn" class="storebtn" style="margin-left:auto;display:none"></button>
+  <button id="addBtn" class="storebtn" style="background:rgba(59,130,246,.18);color:#60a5fa">＋ 新增項目</button>
+  <button id="storeBtn" class="storebtn" style="margin-left:8px">偵測中</button>
 </div>
 <div id="banner"></div>
 <div id="cfgerr" style="display:none;margin:14px 22px 0;padding:11px 16px;border-radius:10px;background:rgba(239,68,68,.18);color:#fecaca;border:1px solid rgba(239,68,68,.5);font-size:14px;font-weight:700"></div>
@@ -104,6 +124,49 @@
 </div>
 <div class="wrap" id="cards"></div>
 <div id="toast"></div>
+<div id="toModal" style="display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="width:440px;max-width:92vw;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px">📥 收信信箱（可多個）</div>
+    <div class="meta" style="margin-bottom:14px">有貨/新上架的通知會同時寄給清單裡每一位。被停用或 ✕ 的品項不寄。</div>
+    <div id="to_list" style="margin-bottom:12px"></div>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="to_new" type="text" placeholder="新增收件信箱 yourname@example.com" autocomplete="off"
+        style="flex:1;padding:9px 11px;border-radius:8px;background:#1a1d24;color:#e6e9ef;border:1px solid var(--line)">
+      <button id="to_add" style="flex:0 0 auto;padding:9px 16px;border:0;border-radius:8px;cursor:pointer;background:var(--green);color:#04210f;font-weight:800">＋ 新增</button>
+    </div>
+    <div id="to_msg" class="meta" style="min-height:16px;margin-bottom:12px"></div>
+    <div style="text-align:right">
+      <button id="to_close" style="padding:9px 18px;border:0;border-radius:8px;cursor:pointer;background:#242832;color:#9aa3b2;font-weight:700">關閉</button>
+    </div>
+  </div>
+</div>
+<div id="mailModal" style="display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.6);align-items:center;justify-content:center">
+  <div style="width:460px;max-width:92vw;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px">🔗 綁定寄件信箱</div>
+    <div class="meta" style="margin-bottom:16px">設定「用哪個 Gmail 帳號寄通知信」。三步，同一個畫面填完即可。</div>
+
+    <div style="font-size:13px;color:#cbd2dd;margin-bottom:6px">① 寄件 Gmail 地址</div>
+    <input id="mm_user" type="text" placeholder="例如 yourname@gmail.com" autocomplete="off"
+      style="width:100%;padding:9px 11px;border-radius:8px;background:#1a1d24;color:#e6e9ef;border:1px solid var(--line);margin-bottom:14px">
+
+    <div style="font-size:13px;color:#cbd2dd;margin-bottom:6px">② 到 Google 產生 16 碼應用程式密碼</div>
+    <button id="mm_open" style="width:100%;padding:10px;border:0;border-radius:8px;cursor:pointer;background:var(--blue);color:#fff;font-weight:700;margin-bottom:4px">🔗 開啟 Google 應用程式密碼頁</button>
+    <div class="meta" style="margin-bottom:14px;line-height:1.7">先用要寄件的那個 Gmail 登入、且已開兩步驟驗證；名稱隨便填→建立→複製 16 碼。</div>
+
+    <div style="font-size:13px;color:#cbd2dd;margin-bottom:6px">③ 貼上 16 碼（有空格沒關係）</div>
+    <input id="mm_pw" type="password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off"
+      style="width:100%;padding:9px 11px;border-radius:8px;background:#1a1d24;color:#e6e9ef;border:1px solid var(--line);margin-bottom:8px">
+    <label class="meta" style="display:flex;align-items:center;gap:6px;margin-bottom:16px;cursor:pointer">
+      <input id="mm_show" type="checkbox"> 顯示密碼確認沒貼錯
+    </label>
+
+    <div style="display:flex;gap:10px">
+      <button id="mm_cancel" style="flex:0 0 auto;padding:10px 16px;border:0;border-radius:8px;cursor:pointer;background:#242832;color:#9aa3b2;font-weight:700">取消</button>
+      <button id="mm_save" style="flex:1;padding:10px;border:0;border-radius:8px;cursor:pointer;background:var(--green);color:#04210f;font-weight:800">儲存並寄測試信</button>
+    </div>
+    <div id="mm_msg" class="meta" style="margin-top:10px;min-height:16px"></div>
+  </div>
+</div>
 
 <script>
 let prevBuyable = {};
@@ -121,14 +184,111 @@ let prevMm = {};
 let storesState = {funbox:true, eslite:true, momo:true, tcsb:true, ehobby:true, mm:true};
 const results = {};
 
+let fbAutoMode = null;   // funbox 下單模式（由 /api/health 帶入）
+let esAutoMode = null;   // 誠品 下單模式（由 /api/health 帶入）
+let tcsbAutoMode = null; // 墊腳石 下單模式（由 /api/health 帶入）
+function updateFbModeBtn(){
+  const fb = document.getElementById('fbModeBtn');
+  const es = document.getElementById('esModeBtn');
+  const tc = document.getElementById('tcsbModeBtn');
+  const ab = document.getElementById('addBtn');
+  const showFb = (activeTab === 'funbox');
+  const showEs = (activeTab === 'eslite');
+  const showTc = (activeTab === 'tcsb');
+  if(fb) fb.style.display = showFb ? '' : 'none';
+  if(es) es.style.display = showEs ? '' : 'none';
+  if(tc) tc.style.display = showTc ? '' : 'none';
+  // 有模式鈕時由它靠右；沒有時換「＋新增項目」自己靠右
+  if(ab) ab.style.marginLeft = (showFb || showEs || showTc) ? '' : 'auto';
+  if(showTc && tc){
+    if(tcsbAutoMode === true){
+      tc.style.background='rgba(34,197,94,.18)'; tc.style.color='#22c55e';
+      tc.textContent='🚀 自動送出訂單:開（取貨付款）';
+    }else if(tcsbAutoMode === false){
+      tc.style.background='rgba(245,158,11,.18)'; tc.style.color='#f59e0b';
+      tc.textContent='✋ 手動送出:開（點此切自動送出訂單）';
+    }else{
+      tc.style.background='#242832'; tc.style.color='#8b93a1'; tc.textContent='下單模式…';
+    }
+  }
+  if(showFb && fb){
+    if(fbAutoMode === true){
+      fb.style.background='rgba(34,197,94,.18)'; fb.style.color='#22c55e';
+      fb.textContent='🚀 自動立即結帳:開（貨到付款）';
+    }else if(fbAutoMode === false){
+      fb.style.background='rgba(245,158,11,.18)'; fb.style.color='#f59e0b';
+      fb.textContent='✋ 手動確認:開（點此切自動立即結帳）';
+    }else{
+      fb.style.background='#242832'; fb.style.color='#8b93a1'; fb.textContent='下單模式…';
+    }
+  }
+  if(showEs && es){
+    if(esAutoMode === true){
+      es.style.background='rgba(34,197,94,.18)'; es.style.color='#22c55e';
+      es.textContent='🚀 自動確認結帳:開（超商取貨付款）';
+    }else if(esAutoMode === false){
+      es.style.background='rgba(245,158,11,.18)'; es.style.color='#f59e0b';
+      es.textContent='✋ 手動確認:開（點此切自動確認結帳）';
+    }else{
+      es.style.background='#242832'; es.style.color='#8b93a1'; es.textContent='下單模式…';
+    }
+  }
+}
+async function toggleTcsbMode(){
+  const want = !(tcsbAutoMode === true);
+  const msg = want
+    ? '墊腳石切換為「自動送出訂單」？\n\n有貨 → 後端自動加購物車 → 結帳頁自動選好全家取貨付款＋門市＋發票 → 自動按「送出訂單」。\n只走取貨付款（貨到付款），信用卡等一律不碰、不送出；門市沒帶入也不會送。\n（不想要的訂單不去取貨即自動取消）\n\n※ 已開著的墊腳石結帳頁要重新整理才會套用新模式'
+    : '墊腳石切換為「手動送出」？\n\n一切自動選好，最後「送出訂單」由你自己按。\n\n※ 已開著的墊腳石結帳頁要重新整理才會套用新模式';
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch('/api/tcsb_mode',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({auto: want})});
+    const d = await r.json();
+    tcsbAutoMode = d.auto;
+    updateFbModeBtn();
+    toast('墊腳石已切換：'+(d.auto?'自動送出訂單（取貨付款）':'手動送出')+(d.config_changed?'（config 已更新）':'（config 寫入失敗！）'), d.config_changed?'ok':'err');
+  }catch(e){ toast('切換失敗：連不到伺服器', 'err'); }
+}
+async function toggleEsMode(){
+  const want = !(esAutoMode === true);
+  const msg = want
+    ? '誠品切換為「自動確認結帳」？\n\n有貨 → 自動加購物車 → step2 選 7-11 取貨＋超商取貨付款＋近期地址 → 勾同意條款 → 自動按「確認結帳」送出。\n只走超商取貨付款（貨到付款），信用卡等一律不碰、不送出；門市沒帶入也不會送。\n（不想要的訂單不去取貨即自動取消）\n\n※ 已開著的誠品分頁要重新整理才會套用新模式'
+    : '誠品切換為「手動確認」？\n\n一切自動選好，最後「確認結帳」由你自己按。\n\n※ 已開著的誠品分頁要重新整理才會套用新模式';
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch('/api/eslite_mode',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({auto: want})});
+    const d = await r.json();
+    esAutoMode = d.auto;
+    updateFbModeBtn();
+    toast('誠品已切換：'+(d.auto?'自動確認結帳（超商取貨付款）':'手動確認')+(d.config_changed?'（config 已更新）':'（config 寫入失敗！）'), d.config_changed?'ok':'err');
+  }catch(e){ toast('切換失敗：連不到伺服器', 'err'); }
+}
+async function toggleFbMode(){
+  const want = !(fbAutoMode === true);
+  const msg = want
+    ? '切換為「自動立即結帳」？\n\n有貨 → 加購物車 → 選 7-11 貨到付款 → 自動按「立即結帳」完成下單。\n不是貨到付款絕不送出；同商品只自動下 1 單。\n（不想要的訂單不去取貨即自動取消）\n\n※ 已開著的 funbox 分頁要重新整理才會套用新模式'
+    : '切換為「手動確認」？\n\n一切自動選好，最後「立即結帳」由你自己按。\n\n※ 已開著的 funbox 分頁要重新整理才會套用新模式';
+  if(!confirm(msg)) return;
+  try{
+    const r = await fetch('/api/fb_mode',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({auto: want})});
+    const d = await r.json();
+    fbAutoMode = d.auto;
+    updateFbModeBtn();
+    toast('已切換：'+(d.auto?'自動立即結帳（貨到付款）':'手動確認')+(d.config_changed?'（config 已更新）':'（config 寫入失敗！）'), d.config_changed?'ok':'err');
+  }catch(e){ toast('切換失敗：連不到伺服器', 'err'); }
+}
 function updateStoreBtn(){
   const b = document.getElementById('storeBtn');
   const cb = document.getElementById('cartBtn');
-  if(activeTab === 'log'){            // 紀錄分頁不是商店，隱藏這兩顆
-    b.style.display='none'; if(cb) cb.style.display='none';
+  const ab = document.getElementById('addBtn');
+  if(activeTab === 'log'){            // 紀錄分頁不是商店，隱藏這幾顆
+    b.style.display='none'; if(cb) cb.style.display='none'; if(ab) ab.style.display='none';
     return;
   }
-  b.style.display=''; if(cb) cb.style.display='';
+  b.style.display=''; if(cb) cb.style.display=''; if(ab) ab.style.display='';
+  updateFbModeBtn();
   const on = storesState[activeTab] !== false;
   b.className = 'storebtn ' + (on?'on':'off');
   b.textContent = on ? '🟢 偵測中（點此停用）' : '⏸ 已停用偵測（點此啟用）';
@@ -143,6 +303,65 @@ async function toggleStore(){
   }catch(e){}
 }
 
+function rmvBtn(store, name, id){
+  // 卡片左上角的 ✕：移除監控目標並「反向更新 config」（該店的 targets 會同步刪掉）
+  const b=document.createElement('button');
+  b.className='rmv'; b.textContent='✕'; b.title='移除這個監控目標（會同步從 config 移除）';
+  b.addEventListener('click', async (ev)=>{
+    ev.stopPropagation();
+    if(!confirm('移除「'+name+'」？\n\n會同步從 config/'+store+'.json 的 targets 刪掉，之後不再監控。\n（想再監控就把它加回 config 並重開程式）')) return;
+    b.disabled=true; b.textContent='…';
+    try{
+      const r=await fetch('/api/remove_target',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({store:store, name:name, id:id||''})});
+      const d=await r.json();
+      if(d.ok){
+        // 立即從畫面拿掉，不等下一次輪詢
+        if(lastState){
+          const bucket = store==='funbox' ? (lastState.targets||{}) : (lastState[store]||{});
+          delete bucket[name];
+          render(lastState);
+        }
+        toast('已移除 '+name+(d.config_changed?'（config 已更新）':'（config 中找不到，僅移除畫面）'), 'ok');
+      }else{
+        toast('移除失敗：'+(d.reason||'?'), 'err'); b.disabled=false; b.textContent='✕';
+      }
+    }catch(e){ toast('移除失敗：連不到伺服器', 'err'); b.disabled=false; b.textContent='✕'; }
+  });
+  return b;
+}
+
+function prioBadge(store, name){
+  // 卡片右下角：搶購優先級徽章。已設→顯示 ①②③（點一下取消並自動重編號）；未設→☆（點一下加入，最多3）
+  const list = (lastState && lastState.priority && lastState.priority[store]) || [];
+  const idx = list.indexOf(name);
+  const b = document.createElement('button');
+  b.className = 'prio' + (idx>=0 ? ' set' : '');
+  b.textContent = idx>=0 ? String(idx+1) : '☆';
+  b.title = idx>=0 ? ('搶購優先 '+(idx+1)+'　（點一下取消）') : '設為搶購優先（點一下加入，最多 3 個）';
+  b.addEventListener('click', (ev)=>{ ev.stopPropagation(); cyclePriority(store, name); });
+  return b;
+}
+async function cyclePriority(store, name){
+  let list = (((lastState||{}).priority||{})[store] || []).slice();
+  const i = list.indexOf(name);
+  if(i>=0){ list.splice(i,1); }                 // 已在名單 → 移除（其餘自動遞補編號）
+  else {
+    if(list.length>=3){ toast('每頁最多 3 個優先，先取消一個再設', 'err'); return; }
+    list.push(name);                             // 不在 → 加到最後（＝下一個名次）
+  }
+  if(lastState){ lastState.priority = lastState.priority||{}; lastState.priority[store]=list; render(lastState); }  // 樂觀更新
+  try{
+    const r=await fetch('/api/priority',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({store:store, priority:list})});
+    const d=await r.json();
+    if(d.ok){
+      if(lastState){ lastState.priority[store]=d.priority; }
+      toast('搶購優先級：'+(d.priority.length? d.priority.map((n,k)=>(k+1)+'.'+n).join('　') : '已清空')
+            +(d.config_changed?'（config 已更新）':'（config 寫入失敗）'), d.config_changed?'ok':'err');
+    }else{ toast('設定失敗：'+(d.reason||'?'), 'err'); }
+  }catch(e){ toast('設定失敗：連不到伺服器', 'err'); }
+}
 async function toggleAuto(store, model, enable){
   const key = offKey(store, model);
   if(enable) disabledSet.delete(key); else disabledSet.add(key);
@@ -167,7 +386,123 @@ function setResult(model, msg, ok){
   results[model] = {msg, ok};
   if(lastState) render(lastState);
 }
+let mailToList = [];
+let mailSender = '';
+let mailSenderReady = false;
+function updateBindBtn(){
+  const b = document.getElementById('bindBtn');
+  if(!b) return;
+  if(mailSenderReady){
+    b.style.background='rgba(34,197,94,.15)'; b.style.color='#22c55e';
+    b.textContent='📤 寄件：' + (mailSender.length > 22 ? mailSender.slice(0, 20) + '…' : mailSender);
+  }else{
+    b.style.background='rgba(245,158,11,.18)'; b.style.color='#f59e0b';
+    b.textContent='📤 寄件信箱未綁定';
+  }
+  b.title='寄信用的 Gmail 帳號。點此綁定：輸入地址 → 開 Google 頁面產生應用程式密碼 → 貼回來，寫入 config 立即生效。';
+}
+function bindSender(){
+  document.getElementById('mm_user').value = mailSender || '';
+  document.getElementById('mm_pw').value = '';
+  document.getElementById('mm_pw').type = 'password';
+  document.getElementById('mm_show').checked = false;
+  document.getElementById('mm_msg').textContent = '';
+  document.getElementById('mailModal').style.display = 'flex';
+  document.getElementById('mm_user').focus();
+}
+function closeMailModal(){ document.getElementById('mailModal').style.display = 'none'; }
+async function saveMailSender(){
+  const user = document.getElementById('mm_user').value.trim();
+  const pw = document.getElementById('mm_pw').value;
+  const msg = document.getElementById('mm_msg');
+  if(!user || user.indexOf('@') < 0){ msg.style.color='#fca5a5'; msg.textContent='① 寄件信箱格式不對（要含 @）'; return; }
+  if(!pw.trim()){ msg.style.color='#fca5a5'; msg.textContent='③ 還沒貼上 16 碼'; return; }
+  msg.style.color='#8b93a1'; msg.textContent='儲存中…';
+  try{
+    const r = await fetch('/api/mail_sender', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user: user, password: pw})});
+    const d = await r.json();
+    if(!d.ok){ msg.style.color='#fca5a5'; msg.textContent='綁定失敗：' + (d.reason||'?'); return; }
+    mailSender = d.user; mailSenderReady = true; updateBindBtn();
+    msg.style.color='#8b93a1'; msg.textContent='已綁定，正在寄測試信…';
+    try{
+      const td = await (await fetch('/api/mail_test')).json();
+      if(td.ok){
+        msg.style.color='#4ade80';
+        msg.textContent='✅ 已綁定 '+d.user+'，測試信已送出 — 去 '+'收信信箱'+' 收（含垃圾郵件夾）';
+        setTimeout(closeMailModal, 2500);
+      }else{
+        msg.style.color='#fca5a5'; msg.textContent='已綁定，但測試信未送出：'+(td['說明']||'?');
+      }
+    }catch(e){ msg.style.color='#fca5a5'; msg.textContent='已綁定，但測試信連線失敗'; }
+  }catch(e){ msg.style.color='#fca5a5'; msg.textContent='綁定失敗：連不到伺服器'; }
+}
+function updateMailBtn(){
+  const b = document.getElementById('mailBtn');
+  if(!b) return;
+  const n = mailToList.length;
+  if(n === 1){
+    b.style.background='rgba(59,130,246,.20)'; b.style.color='#93c5fd';
+    b.textContent = '📥 收信：' + (mailToList[0].length > 22 ? mailToList[0].slice(0,20)+'…' : mailToList[0]);
+  }else if(n > 1){
+    b.style.background='rgba(59,130,246,.20)'; b.style.color='#93c5fd';
+    b.textContent = '📥 收信：' + n + ' 個信箱';
+  }else{
+    b.style.background='rgba(245,158,11,.18)'; b.style.color='#f59e0b';
+    b.textContent = '📥 收信信箱未設定';
+  }
+  b.title = '通知信寄給：' + (mailToList.join('、') || '未設定') + '（點此管理）';
+}
+function renderToList(){
+  const box = document.getElementById('to_list');
+  if(!mailToList.length){ box.innerHTML = '<div class="meta">目前沒有收件人 —— 下方新增一個。</div>'; return; }
+  box.innerHTML = '';
+  mailToList.forEach(function(addr){
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 10px;margin-bottom:6px;background:#1a1d24;border:1px solid var(--line);border-radius:8px';
+    const txt = document.createElement('span'); txt.textContent = addr;
+    txt.style.cssText = 'flex:1;font-size:13px;color:#e6e9ef;word-break:break-all';
+    const del = document.createElement('button'); del.textContent = '✕ 移除';
+    del.style.cssText = 'flex:0 0 auto;padding:4px 10px;border:0;border-radius:6px;cursor:pointer;background:rgba(239,68,68,.20);color:#f87171;font-size:12px;font-weight:700';
+    del.addEventListener('click', function(){ mailRemove(addr); });
+    row.appendChild(txt); row.appendChild(del); box.appendChild(row);
+  });
+}
+async function mailRemove(addr){
+  try{
+    const d = await (await fetch('/api/mail_to', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'remove', to:addr})})).json();
+    if(d.ok){ mailToList = d.list; renderToList(); updateMailBtn(); toast('已移除 '+addr, 'ok'); }
+    else{ toast('移除失敗：'+(d.reason||'?'), 'err'); }
+  }catch(e){ toast('移除失敗：連不到伺服器', 'err'); }
+}
+async function mailAdd(){
+  const inp = document.getElementById('to_new');
+  const msg = document.getElementById('to_msg');
+  const addr = inp.value.trim();
+  if(!addr || addr.indexOf('@') < 0){ msg.style.color='#fca5a5'; msg.textContent='信箱格式不對（要含 @）'; return; }
+  try{
+    const d = await (await fetch('/api/mail_to', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action:'add', to:addr})})).json();
+    if(d.ok){ mailToList = d.list; renderToList(); updateMailBtn(); inp.value=''; msg.style.color='#4ade80'; msg.textContent='已新增（config 已更新，立即生效）'; }
+    else{ msg.style.color='#fca5a5'; msg.textContent='新增失敗：'+(d.reason||'?'); }
+  }catch(e){ msg.style.color='#fca5a5'; msg.textContent='新增失敗：連不到伺服器'; }
+}
+function editMailTo(){
+  renderToList();
+  document.getElementById('to_new').value = '';
+  document.getElementById('to_msg').textContent = '';
+  document.getElementById('toModal').style.display = 'flex';
+  document.getElementById('to_new').focus();
+}
 function updateBanner(h){
+  if(h && typeof h.auto_checkout !== 'undefined'){ fbAutoMode = !!h.auto_checkout; updateFbModeBtn(); }
+  if(h && typeof h.eslite_auto_checkout !== 'undefined'){ esAutoMode = !!h.eslite_auto_checkout; updateFbModeBtn(); }
+  if(h && typeof h.tcsb_auto_checkout !== 'undefined'){ tcsbAutoMode = !!h.tcsb_auto_checkout; updateFbModeBtn(); }
+  if(h && typeof h.mail_to_list !== 'undefined'){ mailToList = h.mail_to_list || []; updateMailBtn(); }
+  if(h && typeof h.mail_sender !== 'undefined'){
+    mailSender = h.mail_sender || ''; mailSenderReady = !!h.mail_sender_ready; updateBindBtn();
+  }
   const b = document.getElementById('banner');
   if(!h){ b.className=''; b.textContent=''; return; }
   var autoTxt = h.auto_add ? '　｜　⚡ 自動加入：開（偵測到就自動放入購物車並跳結帳）' : '';
@@ -290,7 +625,7 @@ function renderEslite(state){
   document.getElementById('controlbar').style.display = 'none';
   const banner = document.getElementById('banner');
   banner.className = 'show good';
-  banner.textContent = '📚 誠品：偵測到有貨→自動開商品頁→腳本自動加入購物車→跳 step2 結帳（每件上限 1）。需裝 eslite_grab 腳本＋登入誠品。最後刷卡送出你本人按。關閉某件「自動」則只通知、不自動加入。';
+  banner.textContent = '📚 誠品：偵測到有貨→自動開商品頁→腳本自動加入購物車→跳 step2 自動選 7-11 取貨＋超商取貨付款＋近期地址（每件上限 1）。需裝 eslite_grab 腳本(v1.9)＋登入誠品。右上「下單模式」預設手動＝最後「確認結帳」自己按；切自動＝門市帶入且付款為超商取貨付款時，自動勾同意並按「確認結帳」送出（不碰信用卡）。關閉某件「自動」則只通知、不自動加入。';
   const esl = state.eslite || {};
   cards.innerHTML = '';
   const vals = Object.values(esl);
@@ -314,6 +649,8 @@ function renderEslite(state){
       '<div class="title">'+((e.title||'')+priceTxt)+'</div>' +
       '<a class="link" href="'+e.url+'" target="_blank">前往商品頁 ↗</a>' + note;
     card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('eslite', e.name, !autoEnabled));
+    card.appendChild(rmvBtn('eslite', e.name));
+    card.appendChild(prioBadge('eslite', e.name));
     cards.appendChild(card);
   });
 }
@@ -344,6 +681,7 @@ function renderMomo(state){
     card.innerHTML='<div class="mrow"><span class="model">'+m.name+'</span>'+tglHtml+'</div>'+badge+
       '<div class="title" style="color:#8b93a1">'+priceTxt+(m.i_code?'　｜　i_code '+m.i_code:'')+'</div>'+link+note;
     card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('momo', m.name, !autoEnabled));
+    card.appendChild(rmvBtn('momo', m.name));
     cards.appendChild(card);
   });
 }
@@ -352,7 +690,7 @@ function renderTcsb(state){
   const cards=document.getElementById('cards');
   document.getElementById('controlbar').style.display='none';
   const banner=document.getElementById('banner'); banner.className='show good';
-  banner.textContent='🪜 墊腳石：用關鍵字偵測（走官方搜尋 API）。有貨會通知＋自動開商品頁；加入購物車與結帳由你自己按。也可在 config 填商品網址精準鎖定單一商品。';
+  banner.textContent='🪜 墊腳石：用關鍵字偵測（走官方搜尋 API）。有貨→後端 cookie 自動加購物車→結帳頁自動選全家取貨付款＋門市＋手機條碼發票。需裝 tcsb_grab 腳本(v3.6)＋填 session_cookie。右上「下單模式」預設手動＝最後「送出訂單」自己按；切自動＝門市帶入且配送為取貨付款(貨到付款)時，自動按「送出訂單」（不碰信用卡）。也可在 config 填商品網址精準鎖定單一商品。';
   const to=state.tcsb||{}; cards.innerHTML='';
   const vals=Object.values(to);
   if(!vals.length){ cards.innerHTML='<div class="meta" style="padding:12px">尚未設定墊腳石商品。把 www.tcsb.com.tw 的商品網址給 Claude，會自動加入 config 的 tcsb.targets。</div>'; return; }
@@ -372,6 +710,8 @@ function renderTcsb(state){
       '<div class="title" style="color:#8b93a1">'+priceTxt+(c.code?'　｜　條碼 '+c.code:'')+'</div>'+
       '<a class="link" href="'+(c.url||'#')+'" target="_blank">前往商品頁 ↗</a>'+note;
     card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('tcsb', c.name, !autoEnabled));
+    card.appendChild(rmvBtn('tcsb', c.name));
+    card.appendChild(prioBadge('tcsb', c.name));
     cards.appendChild(card);
   });
 }
@@ -444,6 +784,7 @@ function renderMm(state){
       +(c.specId?('　｜　spec '+c.specId):'')+'</div>')
       +'<div class="title" style="color:#8b93a1">最後回報 '+(c.lastSeen||'—')+'</div>'
       +'<a class="link" href="'+(c.url||'#')+'" target="_blank">前往商品頁 ↗</a>'+watchTxt;
+    card.appendChild(rmvBtn('mm', c.name));
     cards.appendChild(card);
   });
 }
@@ -500,6 +841,7 @@ function renderEhobby(state){
       +'<div class="title" style="color:#8b93a1">'+priceTxt+(c.foundAt?('　｜　偵測 '+c.foundAt):'')+'</div>'
       +(c.url?('<a class="link" href="'+c.url+'" target="_blank">前往商品頁 ↗</a>'):'<span class="meta">（上架後這裡會出現商品連結）</span>');
     card.querySelector('.autotgl').addEventListener('click', ()=>toggleAuto('ehobby', c.name, !autoEnabled));
+    card.appendChild(rmvBtn('ehobby', c.name, c.id));
     cards.appendChild(card);
   });
 }
@@ -547,7 +889,8 @@ function render(state){
   // config 檔壞掉（JSON 打錯字）→ 該店會無聲消失，這裡大聲顯示
   const ce=document.getElementById('cfgerr');
   if(ce){
-    const errs=state.config_errors||[];
+    const errs=(state.config_errors||[]).slice();
+    if(state.tcsb_login_lost) errs.unshift('墊腳石未登入 — 請到瀏覽器重新登入墊腳石（記得勾記住我），否則有貨無法自動加入');
     ce.style.display = errs.length ? '' : 'none';
     ce.textContent = errs.length ? ('⛔ '+errs.join('　｜　')) : '';
   }
@@ -618,6 +961,8 @@ function render(state){
         if(bb) bb.addEventListener('click', ev=>addToCart(t.model, t.variant_id, ev.target));
       }
     }
+    card.appendChild(rmvBtn('funbox', t.model));
+    card.appendChild(prioBadge('funbox', t.model));
     cards.appendChild(card);
   });
   updateControlBar(state);
@@ -646,7 +991,12 @@ function updateCartBtn(){
   document.getElementById('cartBtn').textContent = label[activeTab] || label.funbox;
 }
 document.getElementById('cartBtn').addEventListener('click', function(){
-  window.open(CART_URL[activeTab] || CART_URL.funbox, '_blank');
+  let u = CART_URL[activeTab] || CART_URL.funbox;
+  // funbox：帶上當前下單模式的暗號 —— 自動模式下你自己開購物車，腳本也會接手跑完
+  if(activeTab === 'funbox' && fbAutoMode !== null){
+    u += (u.indexOf('?')>=0?'&':'?') + 'fborder=' + (fbAutoMode ? '1' : '0');
+  }
+  window.open(u, '_blank');
 });
 document.querySelectorAll('.tab').forEach(function(btn){
   btn.addEventListener('click', function(){
@@ -656,6 +1006,56 @@ document.querySelectorAll('.tab').forEach(function(btn){
     updateStoreBtn();
     if(lastState) render(lastState);
   });
+});
+const ADD_HINT = {
+  funbox: '輸入型號（例如 UX-21）：',
+  eslite: '輸入誠品搜尋關鍵字（要精確，例如 戰鬥陀螺 UX-21）：',
+  momo:   '貼上 momo 商品網址（或純數字 i_code）：',
+  tcsb:   '輸入關鍵字，或貼商品網址／條碼：',
+  ehobby: '輸入型號或商品名片段（例如 UX-21；已上架的會自動找到並轉盯庫存）：',
+  mm:     '輸入型號（例如 UX-21；巡邏分頁下一輪自動生效）：'
+};
+async function addTarget(){
+  const store = activeTab;
+  if(!(store in ADD_HINT)){ toast('這個分頁不能新增', 'err'); return; }
+  const v = prompt(ADD_HINT[store]);
+  if(v===null || !v.trim()) return;
+  let name = '';
+  if(store==='momo'){
+    name = prompt('顯示名稱（選填，例如 UX-22 ○○○；留空就用 i_code）：') || '';
+  }
+  try{
+    const r = await fetch('/api/add_target',{method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({store:store, value:v.trim(), name:name.trim()})});
+    const d = await r.json();
+    if(d.ok){
+      toast('已新增 '+d.name+'（config 已更新'+(store==='mm'?'，巡邏下一輪生效':'，下一輪偵測生效')+'）', 'ok');
+      await tick();
+    }else{
+      toast('新增失敗：'+(d.reason||'?'), 'err');
+    }
+  }catch(e){ toast('新增失敗：連不到伺服器', 'err'); }
+}
+document.getElementById('addBtn').addEventListener('click', addTarget);
+document.getElementById('fbModeBtn').addEventListener('click', toggleFbMode);
+document.getElementById('esModeBtn').addEventListener('click', toggleEsMode);
+document.getElementById('tcsbModeBtn').addEventListener('click', toggleTcsbMode);
+document.getElementById('mailBtn').addEventListener('click', editMailTo);
+document.getElementById('to_add').addEventListener('click', mailAdd);
+document.getElementById('to_close').addEventListener('click', function(){ document.getElementById('toModal').style.display='none'; });
+document.getElementById('to_new').addEventListener('keydown', function(e){ if(e.key==='Enter') mailAdd(); });
+document.getElementById('toModal').addEventListener('click', function(e){ if(e.target===this) this.style.display='none'; });
+document.getElementById('bindBtn').addEventListener('click', bindSender);
+document.getElementById('mm_open').addEventListener('click', function(){
+  window.open('https://myaccount.google.com/apppasswords', '_blank');
+});
+document.getElementById('mm_cancel').addEventListener('click', closeMailModal);
+document.getElementById('mm_save').addEventListener('click', saveMailSender);
+document.getElementById('mm_show').addEventListener('change', function(e){
+  document.getElementById('mm_pw').type = e.target.checked ? 'text' : 'password';
+});
+document.getElementById('mailModal').addEventListener('click', function(e){
+  if(e.target === this) closeMailModal();
 });
 document.getElementById('storeBtn').addEventListener('click', toggleStore);
 updateCartBtn();

@@ -1,14 +1,12 @@
 /* 由 funbox_grab.user.js 移植成 Chrome 外掛的 content script。
-   注入範圍改由 manifest.json 的 content_scripts 決定。
-   安全界線不變：不碰信用卡卡號，不會替你送出訂單。 */
-
+   v1.5：模式直接問 server（/api/fb_mode），不再靠網址暗號；自動模式=按最後的「立即結帳」（限貨到付款）。 */
 
 (function () {
   'use strict';
 
   // ====== 你的偏好設定（要換就改這裡）======
   var WANT_SHIP_TAB = '超商';              // 超商 或 宅配
-  var WANT_SHIP     = /^7-11\s*取貨/;      // 7-11 取貨(先付款) ／ 全家取貨(先付款)
+  var WANT_SHIP     = /^7-11\s*貨到付款/;  // 7-11 貨到付款（取貨時才付錢，結帳少掉整個付款步驟，更快）
   var WANT_PAY      = /^信用卡/;           // 信用卡 ／ Google Pay
   var WANT_INVOICE  = /^手機載具/;         // 會員載具(個人)／公司用(統編)／手機載具／自然人憑證／捐贈碼
   var WANT_STORE    = /南京西門市/;        // 常用門市（只用來確認，不會自動改門市）
@@ -17,6 +15,51 @@
   // =========================================
 
   console.log('[funboxGrab] 啟動', location.pathname);
+
+  // ====== 自動下單模式（v1.4）======
+  // 由 config/funbox.json 的 auto_checkout 控制：server 開頁時帶 ?fborder=1 暗號。
+  // 鐵律：配送一定要是「貨到付款」才會自動送出（下單當下不動錢、取貨才付、
+  //       不去取貨訂單自動取消，下錯單零損失）。先付款/信用卡 → 絕不自動送出。
+  var COD = /貨到付款/;
+  var PREPAY = /先付款|信用卡|GooglePay|ApplePay/i;
+  var ORDERED_KEY = 'fbGrab.ordered';           // { "UX-21": "2026-08-25 10:00", ... }
+  var SERVER = 'http://127.0.0.1:8787';
+
+  // v1.5：模式不再靠網址暗號傳遞（太脆弱：儀表板沒重整、手動開頁都會斷鏈）。
+  // 每次載入直接問 server（儀表板的開關即問即答）；問不到（程式沒開）→ 安全預設：手動。
+  var AUTO_ORDER = /[?&]fborder=1\b/.test(location.search);   // 暗號仍可當初值
+  var MODE_KNOWN = false;
+  try {
+    fetch(SERVER + '/api/fb_mode')
+      .then(function (r) { return r.json(); })
+      .then(function (d) { AUTO_ORDER = !!d.auto; MODE_KNOWN = true;
+                           console.log('[funboxGrab] 模式（來自儀表板）=', AUTO_ORDER ? '自動立即結帳' : '手動確認'); })
+      .catch(function () { MODE_KNOWN = true; });
+  } catch (e) { MODE_KNOWN = true; }
+  setTimeout(function () { MODE_KNOWN = true; }, 8000);   // server 沒回應就照初值走
+
+  function orderedMap() {
+    try { var v = JSON.parse(localStorage.getItem(ORDERED_KEY)); return v && typeof v === 'object' ? v : {}; }
+    catch (e) { return {}; }
+  }
+  function extractModelCodes(text) {
+    // 從訂單文字抽型號（UX-21/BX-35/BXG-57/CX-14…），\b 邊界避免 CX-140 誤中 CX-14
+    var out = [], seen = {};
+    var re = /\b(UX|BX|BXG|CX)\s*-\s*(\d{1,3})\b/gi, m;
+    while ((m = re.exec(text || ''))) {
+      var code = (m[1] + '-' + m[2]).toUpperCase();
+      if (!seen[code]) { seen[code] = 1; out.push(code); }
+    }
+    return out;
+  }
+  function reportOrder(models, note, ok) {
+    try {
+      fetch(SERVER + '/api/order_report', { method: 'POST', mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ store: 'funbox', models: models, note: note, ok: ok }) }).catch(function(){});
+    } catch (e) {}
+  }
+  // =================================
 
   /* ===== 商品頁：儀表板帶 ?fbauto=1 來 → 用你的登入狀態自動加入購物車 =====
      （這是「免 cookie 模式」：不用在 config 填 cookie，只要瀏覽器有登入 funbox）*/
@@ -36,7 +79,9 @@
       clearInterval(pIv);
       try { btn.click(); } catch (e) {}
       // 給它一點時間送出，再去購物車（後續配送/付款由本腳本的購物車段接手）
-      setTimeout(function () { location.href = 'https://shop.funbox.com.tw/cart'; }, 1500);
+      var m = location.search.match(/[?&]fborder=([01])\b/);
+      var carry = m ? ('?fborder=' + m[1]) : '';
+      setTimeout(function () { location.href = 'https://shop.funbox.com.tw/cart' + carry; }, 1500);
     }, 300);
     return;
   }
@@ -189,17 +234,68 @@
       return act(function () { realClick(inv.btn); if (!/\bactive\b/.test(String(inv.box.className||''))) realClick(inv.box); });
     }
 
-    // F) 全部就緒 → 提示（信用卡卡號與最後送出一律你本人操作）
+    if (!doneMsg && !MODE_KNOWN) return;   // 模式還沒問到手 → 先不下結論
+
+    // F-auto) 自動下單：鎖定「貨到付款」→ 同商品 1 單守衛 → 按最後的「立即結帳」
+    if (AUTO_ORDER && !doneMsg) {
+      var activeShip = grids.filter(function (o) { return o.active; });
+      var codOn = activeShip.some(function (o) { return COD.test(o.txt); });
+      var prepayOn = activeShip.some(function (o) { return PREPAY.test(o.txt) && !COD.test(o.txt); });
+      if (!codOn || prepayOn) {
+        if (!grids.some(function (o) { return COD.test(o.txt); })) {
+          doneMsg = true;
+          banner('⛔ 這頁沒有「貨到付款」選項 —— 自動下單取消，請自己選付款並送出', '#dc2626');
+          reportOrder([], '沒有貨到付款選項，未送出', false);
+          return;
+        }
+        return;   // 貨到付款選項在但還沒選中 → 等 C) 把它點起來
+      }
+      var codes = extractModelCodes(document.body.innerText || '');
+      var done = orderedMap();
+      var dup = codes.filter(function (c) { return done[c]; });
+      if (dup.length) {
+        doneMsg = true;
+        banner('⚠️ 訂單含已自動下過的 ' + dup.join('、') + '（同商品只自動下 1 單）— 請自己確認後送出', '#f59e0b');
+        reportOrder(codes, '含已下過的 ' + dup.join('、') + '，未自動送出', false);
+        return;
+      }
+      var submitted = false;
+      try { submitted = sessionStorage.getItem('fbGrab.submitted') === '1'; } catch (e) {}
+      if (submitted) { doneMsg = true; return; }        // 同分頁防重複下單
+      // 實證（2026-08-25 使用者截圖）：funbox 結帳頁最後那顆紅色大鈕的文字就是「立即結帳」
+      // —— 跟購物車步驟的按鈕同名，但這裡 grids 已存在（配送/付款都渲染了），
+      // 所以走到這行時頁面一定是結帳頁，這顆就是送出訂單。
+      var go = findBtn('立即結帳') || findBtn('送出訂單') || findBtn('提交訂單') || findBtn('確認結帳');
+      if (!go) {
+        doneMsg = true;
+        banner('⛔ 找不到「立即結帳/送出訂單」按鈕 —— 未自動送出，請自己按（並告訴 Claude 按鈕的實際文字）', '#dc2626');
+        reportOrder(codes, '找不到送出按鈕，未送出', false);
+        return;
+      }
+      doneMsg = true;
+      try { sessionStorage.setItem('fbGrab.submitted', '1'); } catch (e) {}
+      var now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      codes.forEach(function (c) { done[c] = now; });
+      try { localStorage.setItem(ORDERED_KEY, JSON.stringify(done)); } catch (e) {}
+      banner('🚀 自動送出訂單（7-11 貨到付款）：' + (codes.join('、') || '訂單') + ' — 到貨後記得去取！', '#16a34a');
+      reportOrder(codes, '7-11 貨到付款，已自動送出', true);
+      return act(function () { realClick(go); });
+    }
+
+    // F) 一般模式：全部就緒 → 提示（最後送出你本人按）
     if (!doneMsg) {
       doneMsg = true;
       var bodyTxt = (document.body.innerText || '').replace(/\s+/g, '');
       var storeOK = WANT_STORE.test(bodyTxt);
       var cardPicked = savedCardOptions().some(function (c) { return c.active; });
+      var codShip = grids.some(function (o) { return o.active && /貨到付款/.test(o.txt); });
       banner(!storeOK
-        ? '⚠️ 配送與付款已選好，但門市不是南京西門市，請自己確認門市後再送出'
-        : (cardPicked
-            ? '✅ 已選好 7-11 取貨 ＋ 已存卡片 ＋ 手機載具（南京西門市）— 確認金額後自己按送出訂單'
-            : '✅ 已選好 7-11 取貨 ＋ 信用卡 ＋ 手機載具（南京西門市）— 點卡號欄選你存的卡，再自己按送出訂單'),
+        ? '⚠️ 配送已選好，但門市不是南京西門市，請自己確認門市後再送出'
+        : (codShip
+            ? '✅ 已選好 7-11 貨到付款 ＋ 手機載具 — 模式：手動確認，最後「立即結帳」你自己按（要全自動：儀表板打開「自動立即結帳」後重整此頁）'
+            : (cardPicked
+                ? '✅ 已選好配送 ＋ 已存卡片 ＋ 手機載具 — 確認金額後自己按送出訂單'
+                : '✅ 已選好配送 ＋ 手機載具 — 確認付款後自己按送出訂單')),
         storeOK ? '#16a34a' : '#f59e0b');
       console.log('[funboxGrab] 完成，門市正確=' + storeOK);
     }

@@ -61,6 +61,15 @@ if errorlevel 1 (
   if errorlevel 1 %PY% -m pip install curl_cffi
 )
 
+rem browser_cookie3: lets the backend read live Edge/Chrome cookies (cookie_source=edge for funbox/tcsb).
+rem Optional - without it, cookie_source=edge just won't work and you fall back to a manual session_cookie.
+%PY% -c "import browser_cookie3" >nul 2>&1
+if errorlevel 1 (
+  echo   installing browser_cookie3 ^(for cookie_source=edge auto-read^) ...
+  %PY% -m pip install --quiet --disable-pip-version-check browser_cookie3
+  if errorlevel 1 %PY% -m pip install browser_cookie3
+)
+
 rem ---------- 4. report what we got ----------
 %PY% -c "import requests, bs4" >nul 2>&1
 if errorlevel 1 (
@@ -74,6 +83,12 @@ if errorlevel 1 (
   echo          Fix later with:  %PY% -m pip install curl_cffi
 ) else (
   echo   curl_cffi OK  ^(eslite/momo bot-block bypass active^)
+)
+%PY% -c "import browser_cookie3" >nul 2>&1
+if errorlevel 1 (
+  echo   [WARN] browser_cookie3 NOT installed - cookie_source=edge auto-read off; use manual session_cookie.
+) else (
+  echo   browser_cookie3 OK  ^(cookie_source=edge auto-read available^)
 )
 
 echo.

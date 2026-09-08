@@ -1,10 +1,36 @@
 /* 由 eslite_grab.user.js 移植成 Chrome 外掛的 content script。
    注入範圍改由 manifest.json 的 content_scripts 決定。
-   安全界線不變：不碰信用卡卡號，不會替你送出訂單。 */
+   下單模式改用一般 fetch 問本機伺服器 /api/eslite_mode（外掛沒有 GM_xmlhttpRequest，
+   getMode 會自動退回 fetch）。安全界線不變：不碰信用卡，付款不是超商取貨付款或門市未帶入絕不送出。 */
 
 
 (function () {
   'use strict';
+
+  var SERVER = 'http://127.0.0.1:8787';   // 儀表板本機伺服器（問下單模式用）
+
+  // 問下單模式：優先用 GM_xmlhttpRequest（不受 eslite.com 的 CSP 擋），退回一般 fetch。
+  // 問不到一律當「手動」(false)，絕不會因為連不到就亂送單。
+  function getMode(cb) {
+    var done = false;
+    function once(v) { if (!done) { done = true; cb(!!v); } }
+    if (typeof GM_xmlhttpRequest === 'function') {
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: SERVER + '/api/eslite_mode', timeout: 5000,
+          onload: function (res) { try { once(JSON.parse(res.responseText).auto); } catch (e) { once(false); } },
+          onerror: function () { once(false); }, ontimeout: function () { once(false); }
+        });
+        return;
+      } catch (e) {}
+    }
+    try {
+      fetch(SERVER + '/api/eslite_mode', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { once(d && d.auto); })
+        .catch(function () { once(false); });
+    } catch (e) { once(false); }
+  }
 
   // ---------- 共用：找可見元素、擬真點擊 ----------
   function visible(el) { return el && el.offsetParent !== null; }
@@ -28,6 +54,11 @@
      ========================================================= */
   if (/^\/cart\/step2/.test(location.pathname)) {
     console.log('[esliteGrab] step2：自動設定配送／付款');
+
+    // 下單模式：null=還沒問到、true=自動按「確認結帳」、false=手動（預設）。
+    // 直接問儀表板伺服器，儀表板開關一按、這頁重新整理就生效。
+    var esAutoMode = null;
+    getMode(function (v) { esAutoMode = v; console.log('[esliteGrab] 下單模式 auto=' + esAutoMode); });
 
     // 把目前車內的商品記下來（只取「像購物車列」的連結：附近有數量/小計/移除等字樣，
     // 避免把推薦商品也算進去）
@@ -202,6 +233,93 @@
       return false;
     }
 
+    // ---------- 自動確認結帳（只在儀表板開關為「自動」時執行）----------
+    // 共用橫幅
+    function showBar(text, color) {
+      try {
+        var bar = document.createElement('div');
+        bar.textContent = text;
+        var s = bar.style;
+        s.position = 'fixed'; s.left = '0'; s.right = '0'; s.top = '0'; s.zIndex = '2147483647';
+        s.background = color; s.color = '#fff';
+        s.font = 'bold 14px system-ui,sans-serif'; s.textAlign = 'center'; s.padding = '8px';
+        var put = function () { if (!bar.isConnected && document.body) document.body.appendChild(bar); };
+        put(); setInterval(put, 1500);
+      } catch (e) {}
+    }
+
+    // 送出前最後防線：確認選中的付款「真的是超商取貨付款」，不是信用卡等先付款方式。
+    function payIsCOD() {
+      var box = findOptionBox(WANT_PAY);
+      if (!(box && isChosen(box))) return false;
+      // 再保險：整個選中的付款區塊文字不得出現信用卡／先付款字樣
+      var tx = (box.textContent || '');
+      if (/信用卡|一次付清|先付款|ATM|LINE\s*Pay|街口|悠遊付|Apple\s*Pay|Google\s*Pay/i.test(tx)) return false;
+      return true;
+    }
+
+    // 勾「我同意並已詳細閱讀誠品線上網路服務約定事項」
+    function agreeCheckbox() {
+      var boxes = document.querySelectorAll('input[type=checkbox]');
+      for (var i = 0; i < boxes.length; i++) {
+        var cb = boxes[i];
+        if (!visible(cb)) continue;
+        var lbl = (cb.closest && cb.closest('label')) || cb.parentElement;
+        var tx = (lbl && lbl.textContent) || '';
+        if (/同意/.test(tx) && /(約定|服務條款|條款)/.test(tx)) {
+          if (!cb.checked) { clickEl(cb); if (!cb.checked && lbl) realClick(lbl); }
+          return cb.checked;
+        }
+      }
+      return true;   // 找不到明確的同意框就不擋（誠品可能已預設勾好）
+    }
+
+    // 找「確認結帳」鈕（精準比對，避免誤按「返回前頁」）
+    function findConfirmBtn() {
+      var btns = document.querySelectorAll('button,a');
+      for (var i = 0; i < btns.length; i++) {
+        var tx = (btns[i].textContent || '').replace(/\s+/g, '');
+        if (tx === '確認結帳' && visible(btns[i])) return btns[i];
+      }
+      for (var j = 0; j < btns.length; j++) {
+        var t2 = (btns[j].textContent || '').replace(/\s+/g, '');
+        if (/確認結帳/.test(t2) && !/返回/.test(t2) && visible(btns[j])) return btns[j];
+      }
+      return null;
+    }
+
+    // 全設定好後，若模式=自動 → 勾同意、驗證付款、按「確認結帳」（每個分頁 session 只送一次）
+    function maybeAutoCheckout() {
+      var alreadySent = false;
+      try { alreadySent = (sessionStorage.getItem('esGrab.submitted') === '1'); } catch (e) {}
+      if (alreadySent) { console.log('[esliteGrab] 這個分頁已自動送出過，不再重送'); return; }
+      var submitted = false, waits = 0;
+      var w = setInterval(function () {
+        waits++;
+        if (esAutoMode === null) { if (waits > 24) clearInterval(w); return; }  // 等模式回來（最多約 8 秒）
+        if (esAutoMode !== true) { clearInterval(w); return; }                  // 手動模式 → 絕不送出
+        if (submitted) { clearInterval(w); return; }
+        // 門市沒帶入 → 不自動送，交回給你（避免送出沒有取貨門市的壞單）
+        if (!storeFilled()) {
+          if (waits > 24) { clearInterval(w);
+            showBar('⛔ 自動確認結帳已暫停：門市未帶入，請自己選門市後手動按「確認結帳」', '#dc2626'); }
+          return;
+        }
+        // 付款不是超商取貨付款 → 絕不送出（信用卡等一律不碰）
+        if (!payIsCOD()) { clearInterval(w);
+          showBar('⛔ 自動確認結帳已中止：付款方式不是「超商取貨付款」，請自行確認', '#dc2626'); return; }
+        agreeCheckbox();
+        var btn = findConfirmBtn();
+        if (!btn) { if (waits > 30) { clearInterval(w);
+          showBar('⚠️ 找不到「確認結帳」鈕，請手動按送出', '#f59e0b'); } return; }
+        submitted = true; clearInterval(w);
+        try { sessionStorage.setItem('esGrab.submitted', '1'); } catch (e) {}
+        console.log('[esliteGrab] 自動確認結帳：按下「確認結帳」送出（超商取貨付款）');
+        showBar('🚀 自動確認結帳：已按下「確認結帳」送出（7-ELEVEN 超商取貨付款）— 訂單成立後不取貨即自動取消', '#16a34a');
+        realClick(btn);
+      }, 300);
+    }
+
     var shipOK = false, payOK = false, addrOK = false, storeClicked = false, modalDone = false;
     var tries = 0;
     var t = setInterval(function () {
@@ -224,23 +342,17 @@
         if (!shipOK || !payOK) dumpDiag();
         clearInterval(t);
         console.log('[esliteGrab] step2 完成：取貨=' + shipOK + ' 付款=' + payOK + ' 收件地址=' + addrOK + ' 門市=' + storeFilled());
-        // 提示橫幅：告訴你已設定好，最後一步請自己按
         var allOK = shipOK && payOK && addrOK;
-        try {
-          var bar = document.createElement('div');
-          bar.textContent = allOK
+        // 提示橫幅：手動模式告訴你「最後一步自己按」；自動模式下面 maybeAutoCheckout 會再蓋上自己的橫幅
+        showBar(
+          allOK
             ? '✅ 已選好 7-ELEVEN 取貨 ＋ 超商取貨付款 ＋ 近期寄送地址' +
               (storeFilled() ? '（門市已帶入）' : '（⚠ 門市未帶入，請自己選門市）') +
-              ' — 確認後自己按「確認結帳」送出'
-            : '⚠️ 有項目沒選到（取貨=' + shipOK + ' 付款=' + payOK + ' 地址=' + addrOK + '）。請按 F12 開 Console，把 [esliteGrab][診斷] 那段貼給 Claude';
-          var s = bar.style;
-          s.position = 'fixed'; s.left = '0'; s.right = '0'; s.top = '0'; s.zIndex = '2147483647';
-          s.background = allOK ? (storeFilled() ? '#16a34a' : '#f59e0b') : '#f59e0b';
-          s.color = '#fff'; s.font = 'bold 14px system-ui,sans-serif';
-          s.textAlign = 'center'; s.padding = '8px';
-          var put = function () { if (!bar.isConnected && document.body) document.body.appendChild(bar); };
-          put(); setInterval(put, 1500);
-        } catch (e) {}
+              ' — 手動模式：確認後自己按「確認結帳」送出'
+            : '⚠️ 有項目沒選到（取貨=' + shipOK + ' 付款=' + payOK + ' 地址=' + addrOK + '）。請按 F12 開 Console，把 [esliteGrab][診斷] 那段貼給 Claude',
+          allOK ? (storeFilled() ? '#16a34a' : '#f59e0b') : '#f59e0b');
+        // 全部設定好才可能自動送出；模式是否為「自動」由 maybeAutoCheckout 內部把關
+        if (allOK) maybeAutoCheckout();
       }
     }, 300);
     return;   // step2 只做設定，不執行下面的加入購物車流程

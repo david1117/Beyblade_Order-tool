@@ -22,6 +22,7 @@ Run:
 """
 
 import json
+import random
 import re
 import threading
 import time
@@ -77,7 +78,7 @@ EVENTS: list = []          # 最近 300 筆（給儀表板用）
 EVENTS_MAX = 300
 
 STORE_LABEL = {"funbox": "Funbox", "eslite": "誠品", "momo": "momo",
-               "tcsb": "墊腳石", "ehobby": "東海", "mm": "M.M小舖"}
+               "tcsb": "墊腳石", "ehobby": "東海", "mm": "M.M小舖", "mail": "📧信"}
 
 
 def log_event(store: str, item: str, action: str, ok=None, detail: str = "", url: str = "") -> None:
@@ -224,7 +225,7 @@ def tcsb_add_to_cart(cfg: dict, code: str, qty: int = 1):
     """把墊腳石商品加入購物車（購物車在伺服器端，用你的登入 cookie）。
     每件上限 1：已經在購物車裡就不再加。
     只搶位子，付款與送出訂單一律你自己在網站上完成。"""
-    cookie = str(cfg.get("tcsb", {}).get("session_cookie", "")).strip()
+    cookie = get_tcsb_cookie(cfg)      # 手動貼優先；否則依 cookie_source 從瀏覽器讀即時 cookie
     if not cookie:
         return {"ok": False, "reason": "no_cookie"}
     pid = tcsb_product_id(code, cookie)
@@ -535,6 +536,300 @@ CONFIG_DIR = HERE / "config"
 
 CONFIG_ERRORS: list = []       # 壞掉的 config 檔清單（顯示在儀表板最上方）
 
+# 儀表板按 ✕ 移除的目標：config 已反向更新，但 poll_loop 開跑時抓的清單是舊的，
+# 這裡擋住它把卡片再寫回 STATE（重開程式後 config 就是唯一事實，這個集合歸零）。
+REMOVED_LOCK = threading.Lock()
+REMOVED: set = set()
+
+
+def is_removed(store: str, name: str) -> bool:
+    return f"{store}:{name}" in REMOVED
+
+
+def _target_display_name(store: str, entry, default_spec: str = "") -> str:
+    """config 裡一筆原始目標 → 儀表板卡片上的名稱（各家鍵不一樣）。"""
+    try:
+        if store == "funbox":
+            n = normalize_targets([entry])
+            return n[0]["code"] if n else ""
+        if store == "eslite":
+            n = normalize_eslite([entry])
+            return n[0]["name"] if n else ""
+        if store == "momo":
+            n = normalize_momo([entry])
+            return n[0]["name"] if n else ""
+        if store == "tcsb":
+            n = normalize_tcsb([entry])
+            return n[0]["name"] if n else ""
+        if store == "mm":
+            n = normalize_mm([entry], default_spec)
+            return n[0]["name"] if n else ""
+        if store == "ehobby":
+            if isinstance(entry, dict):
+                return str(entry.get("name", "")).strip()
+            return str(entry).strip()
+    except Exception:
+        pass
+    return ""
+
+
+CFG_FILE_OF = {"funbox": "funbox.json", "eslite": "eslite.json", "momo": "momo.json",
+               "tcsb": "tcsb.json", "ehobby": "ehobby.json", "mm": "mm.json"}
+
+# 儀表板「＋新增」加進來的目標：config 先寫，這裡讓「運行中的」poll_loop
+# 在下一輪開頭撿起來（不用重開程式）。mm 不用進來（巡邏每輪跟 server 要清單）。
+# ---------------------------------------------------------------- Email 通知
+# 有貨/新上架時寄信（config/common.json 的 email 區塊）。
+# 過濾規則（使用者明確要求）：整家店停用偵測、品項被「自動:關」、被 ✕ 移除的 → 不寄。
+# 這跟推播不同：推播刻意「停用也照發」，email 是使用者要乾淨的信箱，所以要過濾。
+
+def mail_recipients(em: dict) -> list:
+    """email.to 可以是單一字串或字串陣列 —— 都轉成去重、去空白的清單。"""
+    raw = em.get("to", "")
+    items = raw if isinstance(raw, list) else [raw]
+    out, seen = [], set()
+    for x in items:
+        a = str(x).strip()
+        if a and "@" in a and a not in seen:
+            seen.add(a); out.append(a)
+    return out
+
+
+def send_mail_async(cfg: dict, subject: str, body: str, url: str = "") -> None:
+    # 每次寄信即時重讀 common.json —— 儀表板改收件人/密碼立即生效，不用重開程式
+    # （poll_loop 傳進來的 cfg 是啟動時抓的快照，會過期）。
+    em = _read_cfg_file("common.json").get("email") or cfg.get("email", {})
+    if not em.get("enabled"):
+        return
+    to_list = mail_recipients(em)
+    user = str(em.get("smtp_user", "")).strip()
+    # Google 顯示應用程式密碼時會分四組帶空格（xxxx xxxx xxxx xxxx），
+    # 使用者原樣貼上是常態 —— 空格一律自動去掉（實際密碼只有 16 個字母）。
+    pw = str(em.get("smtp_password", "")).replace(" ", "").strip()
+    if not (to_list and user and pw):
+        _addlog("MAIL skipped: email 設定不完整（to/smtp_user/smtp_password）")
+        return
+    if "@" not in user:
+        _addlog(f"MAIL skipped: smtp_user 不是完整信箱（缺 @）：{user}")
+        log_event("mail", "設定錯誤", "寄信失敗", ok=False,
+                  detail=f"smtp_user 要填完整信箱（含 @），目前是「{user}」", url="")
+        return
+
+    def _send():
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.header import Header
+        try:
+            text = body + (("\n\n" + url) if url else "") + \
+                   "\n\n— 戰鬥陀螺上架監控 " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            msg = MIMEText(text, "plain", "utf-8")
+            msg["Subject"] = Header(subject, "utf-8")
+            msg["From"] = user
+            msg["To"] = ", ".join(to_list)
+            host = str(em.get("smtp_host", "smtp.gmail.com"))
+            port = int(em.get("smtp_port", 587))
+            with smtplib.SMTP(host, port, timeout=20) as sv:
+                sv.ehlo()
+                sv.starttls()
+                sv.login(user, pw)
+                sv.sendmail(user, to_list, msg.as_string())
+            _addlog(f"MAIL sent to={to_list} subject={subject[:40]}")
+            log_event("mail", subject[:40], f"已寄出通知信（{len(to_list)} 位收件人）",
+                      ok=True, detail="、".join(to_list), url=url)
+        except Exception as e:
+            _addlog(f"MAIL FAILED {type(e).__name__}: {e}")
+            log_event("mail", subject[:40], "寄信失敗", ok=False,
+                      detail=f"{type(e).__name__}: {e}", url="")
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def mail_alert(cfg: dict, store: str, name: str, subject: str, body: str, url: str = "") -> None:
+    """有貨/新上架的寄信入口 —— 集中套用排除規則。"""
+    if not STORE_ON.get(store, True):
+        return                                   # 整家店停用偵測 → 不寄
+    if is_off(store, name) or is_removed(store, name):
+        return                                   # 品項被「自動:關」或被 ✕ → 不寄
+    send_mail_async(cfg, subject, body, url)
+
+
+# funbox 自動下單模式的即時開關（儀表板切換；同步寫回 config/funbox.json）。
+# None = 尚未載入，opens 時退回 cfg 裡的值。
+FB_AUTO = {"val": None}
+
+
+def fb_auto_on(cfg: dict) -> bool:
+    if FB_AUTO["val"] is not None:
+        return bool(FB_AUTO["val"])
+    return bool(cfg.get("fast_cart", {}).get("auto_checkout", False))
+
+
+# 誠品自動確認結帳模式的即時開關（儀表板切換；同步寫回 config/eslite.json）。
+# 預設關閉；None = 尚未載入，退回 config 裡的值。
+ES_AUTO = {"val": None}
+
+
+def eslite_auto_on(cfg: dict) -> bool:
+    if ES_AUTO["val"] is not None:
+        return bool(ES_AUTO["val"])
+    return bool((cfg.get("eslite") or {}).get("auto_checkout", False))
+
+
+# 墊腳石自動送出訂單模式的即時開關（儀表板切換；同步寫回 config/tcsb.json）。
+# 預設關閉；None = 尚未載入，退回 config 裡的值。
+TCSB_AUTO = {"val": None}
+
+
+def tcsb_auto_on(cfg: dict) -> bool:
+    if TCSB_AUTO["val"] is not None:
+        return bool(TCSB_AUTO["val"])
+    return bool((cfg.get("tcsb") or {}).get("auto_checkout", False))
+
+
+# 墊腳石「瀏覽器未登入」提醒的最近一次時間（腳本偵測到登出時回報）。
+# 推播/寄信 30 分鐘冷卻一次；儀表板紅字在最近 30 分鐘內都顯示。
+_tcsb_login_alert = {"ts": 0.0}
+TCSB_LOGIN_ALERT_WINDOW = 1800
+
+# 搶購優先級（各店最多 3 個名稱，順序＝優先 1→2→3）。即時全域：儀表板一改就生效，
+# 同步寫回 config。poll_loop 啟動時從 config 載入。
+PRIORITY = {"funbox": [], "eslite": [], "tcsb": []}
+PRIORITY_STORES = ("funbox", "eslite", "tcsb")
+PRIORITY_CFG_FILE = {"funbox": "funbox.json", "eslite": "eslite.json", "tcsb": "tcsb.json"}
+
+
+def load_priority(cfg: dict) -> None:
+    PRIORITY["funbox"] = list((cfg.get("fast_cart") or {}).get("priority") or [])[:3]
+    PRIORITY["eslite"] = list((cfg.get("eslite") or {}).get("priority") or [])[:3]
+    PRIORITY["tcsb"] = list((cfg.get("tcsb") or {}).get("priority") or [])[:3]
+
+
+PENDING_LOCK = threading.Lock()
+PENDING_ADDS: dict = {"funbox": [], "eslite": [], "momo": [], "tcsb": [], "ehobby": []}
+
+
+def add_target(store: str, value: str, name: str = "") -> dict:
+    """把一個新目標寫進對應 config 檔（反向更新），種出卡片，並讓運行中的偵測接手。
+    value：型號/關鍵字字串；momo 可貼商品網址或 i_code（name 選填當顯示名）。"""
+    fname = CFG_FILE_OF.get(store)
+    value = (value or "").strip()
+    name = (name or "").strip()
+    if not fname or not value:
+        return {"ok": False, "reason": "bad_request"}
+    path = CONFIG_DIR / fname
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "reason": f"config_broken: {e}"}
+
+    # 組 config 原始項目
+    if store == "momo":
+        ic = _extract_icode(value)
+        if not ic:
+            return {"ok": False, "reason": "momo 要貼商品網址或 i_code（純數字）"}
+        entry = {"name": name, "i_code": ic} if name else value
+    else:
+        entry = value
+
+    disp = _target_display_name(store, entry, str(data.get("default_spec", "")))
+    if not disp:
+        return {"ok": False, "reason": "看不懂這個目標的格式"}
+
+    raw = data.get("targets")
+    if not isinstance(raw, list):
+        raw = data["targets"] = []
+    existing = {_target_display_name(store, t, str(data.get("default_spec", ""))) for t in raw}
+    if disp in existing:
+        return {"ok": False, "reason": f"「{disp}」已經在清單裡了"}
+    raw.append(entry)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with REMOVED_LOCK:                      # 之前 ✕ 掉又加回來 → 解除封印
+        REMOVED.discard(f"{store}:{disp}")
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with STATE_LOCK:                        # 卡片立刻出現，不等下一輪
+        if store == "funbox":
+            STATE["targets"].setdefault(disp, _empty(disp))
+        elif store == "eslite":
+            n = normalize_eslite([entry])[0]
+            STATE["eslite"].setdefault(disp, {
+                "name": disp, "listed": False, "buyable": False, "price": "",
+                "url": f"https://www.eslite.com/search?keyword={n['query']}"})
+        elif store == "momo":
+            n = normalize_momo([entry])[0]
+            STATE["momo"].setdefault(disp, {
+                "name": disp, "i_code": n["i_code"], "listed": False, "buyable": False,
+                "price": "", "sale_time": "",
+                "url": f"https://www.momoshop.com.tw/goods/GoodsDetail.jsp?i_code={n['i_code']}"})
+        elif store == "tcsb":
+            n = normalize_tcsb([entry])[0]
+            STATE["tcsb"].setdefault(disp, {
+                "name": disp, "code": n["code"], "listed": False, "buyable": False,
+                "price": "", "title": "",
+                "url": (f"{TCSB_BASE}/{n['code']}" if n["code"]
+                        else f"{TCSB_BASE}/search?query={quote(n['query'])}")})
+        elif store == "ehobby":
+            STATE["ehobby"].setdefault(disp, {
+                "name": disp, "kind": "target", "listed": False, "buyable": None,
+                "price": "", "title": "", "matched": [], "foundAt": "", "url": ""})
+        elif store == "mm":
+            STATE["mm"].setdefault(disp, {
+                "name": disp, "url": "", "targetSpec": str(data.get("default_spec", "")),
+                "configured": True, "phase": "searching", "buyable": None, "stock": None,
+                "watching": False, "specText": "", "lastSeen": "", "addedAt": ""})
+
+    if store in PENDING_ADDS:               # 運行中的迴圈下一輪撿
+        with PENDING_LOCK:
+            PENDING_ADDS[store].append(entry)
+
+    _addlog(f"ADD {store}:{disp}")
+    log_event(store, disp[:40], "已新增監控目標（config 已同步更新）", ok=None,
+              detail=("MM 巡邏下一輪自動生效" if store == "mm" else "下一輪偵測開始生效"),
+              url="")
+    return {"ok": True, "name": disp}
+
+
+def remove_target(store: str, name: str, card_id: str = "") -> dict:
+    """把某個目標從對應的 config 檔移除（反向更新），並讓卡片立即消失。
+    東海的 watch_urls 也會一起查（card_id = 商品 ID 時比對網址）。"""
+    fname = CFG_FILE_OF.get(store)
+    if not fname or not name:
+        return {"ok": False, "reason": "bad_request"}
+    path = CONFIG_DIR / fname
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"ok": False, "reason": f"config_broken: {e}"}
+    default_spec = str(data.get("default_spec", ""))
+    changed = False
+    for key in ("targets", "keywords"):
+        raw = data.get(key)
+        if not isinstance(raw, list):
+            continue
+        keep = [t for t in raw
+                if _target_display_name(store, t, default_spec) != name]
+        if len(keep) != len(raw):
+            data[key] = keep
+            changed = True
+    if store == "ehobby" and card_id and isinstance(data.get("watch_urls"), list):
+        keep = [u for u in data["watch_urls"] if f"/{card_id}" not in str(u)]
+        if len(keep) != len(data["watch_urls"]):
+            data["watch_urls"] = keep
+            changed = True
+    if changed:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 不管 config 有沒有找到（可能是腳本回報的動態卡片），畫面上的卡片都要消失
+    with REMOVED_LOCK:
+        REMOVED.add(f"{store}:{name}")
+    with STATE_LOCK:
+        bucket = STATE["targets"] if store == "funbox" else STATE.get(store, {})
+        bucket.pop(name, None)
+    _addlog(f"REMOVE {store}:{name} config_changed={changed}")
+    log_event(store, name[:40], "已移除監控目標" + ("（config 已同步更新）" if changed else "（僅畫面，config 中找不到）"),
+              ok=None, detail="", url="")
+    return {"ok": True, "config_changed": changed}
+
 
 def _read_json(path: Path, default=None):
     try:
@@ -576,13 +871,21 @@ def split_config_files(cfg: dict) -> None:
             "search_groups": cfg.get("search_groups", ["UX", "BX", "CX"]),
             "_targets說明": "一行一個型號或商品名，逗號分隔，最後一行不加逗號。",
             "targets": cfg.get("targets", []),
+            "_priority說明": "搶購優先級：填最多 3 個型號名稱（順序＝優先 1→2→3）。"
+                            "多件同時有貨時，這幾個會照順序『先』加入購物車，其餘每輪隨機。留空＝全部隨機。",
+            "priority": cfg.get("fast_cart", {}).get("priority", []),
         },
         "eslite.json": {
             "_說明": "誠品線上（eslite.com）。購物車在瀏覽器端，需搭配 eslite_grab.user.js。",
             "enabled": bool(cfg.get("eslite", {}).get("enabled", True)),
             "auto_grab": bool(cfg.get("eslite", {}).get("auto_grab", True)),
+            "auto_checkout": bool(cfg.get("eslite", {}).get("auto_checkout", False)),
+            "_auto_checkout說明": "true = step2 全設定好後自動勾同意條款、自動按「確認結帳」送出（只走 7-11 超商取貨付款／貨到付款，不刷卡）。"
+                                  "false（預設）= 全自動選好，最後「確認結帳」由你本人按。也可在儀表板誠品分頁右上的開關切換。",
             "_targets說明": "誠品是綜合書店，關鍵字要精確，否則會搜到無關的書。",
             "targets": cfg.get("eslite", {}).get("targets", []),
+            "_priority說明": "搶購優先級：最多 3 個名稱（順序＝優先 1→2→3），先開頁加入，其餘每輪隨機。留空＝全隨機。",
+            "priority": cfg.get("eslite", {}).get("priority", []),
         },
         "momo.json": {
             "_說明": "momo（momoshop.com.tw）。鎖定官方商品編號 i_code，避開溢價賣家。需搭配 momo_grab.user.js。",
@@ -596,13 +899,24 @@ def split_config_files(cfg: dict) -> None:
             "_說明": "墊腳石（tcsb.com.tw）。購物車在伺服器端，填 session_cookie 就能自動放入購物車。",
             "enabled": bool(cfg.get("tcsb", {}).get("enabled", True)),
             "auto_grab": bool(cfg.get("tcsb", {}).get("auto_grab", True)),
+            "auto_checkout": bool(cfg.get("tcsb", {}).get("auto_checkout", False)),
+            "_auto_checkout說明": "true = 結帳頁全設定好（全家取貨付款＋門市＋發票）後自動按「送出訂單」。"
+                                  "只走取貨付款(貨到付款)，信用卡等先付款方式一律不碰、不自動送出；門市沒帶入也不會送。"
+                                  "false（預設）= 全自動選好，最後「送出訂單」由你本人按。也可在儀表板墊腳石分頁右上的開關切換。",
             "session_cookie": cfg.get("tcsb", {}).get("session_cookie", ""),
+            "cookie_source": cfg.get("tcsb", {}).get("cookie_source", "manual"),
+            "_cookie_source說明": "manual（預設）＝用下面手動貼的 session_cookie；填 \"edge\"（或 chrome/brave/firefox）"
+                                 "＝後端每輪直接從該瀏覽器讀 tcsb.com.tw 的即時 cookie，只要瀏覽器保持登入就不用再手動重貼。"
+                                 "手動貼的 session_cookie 一律優先；切成 edge 時請把 session_cookie 清空。"
+                                 "⚠ 新版 Edge/Chrome 有 app-bound 加密，可能讀不到 → 那就退回 manual 手動貼。",
             "_cookie怎麼拿": "登入 tcsb.com.tw → F12 → Network → 重新整理 → 點 www.tcsb.com.tw 那筆 → 複製整行 cookie（要含 XSRF-TOKEN 與 _session）",
             "poll_interval_seconds": cfg.get("tcsb", {}).get("poll_interval_seconds", 60),
             "skip_books": bool(cfg.get("tcsb", {}).get("skip_books", False)),
             "exclude": cfg.get("tcsb", {}).get("exclude", []),
             "_targets說明": "一行一個關鍵字；也可寫商品網址或條碼精準鎖定單一商品。",
             "targets": cfg.get("tcsb", {}).get("targets", []),
+            "_priority說明": "搶購優先級：最多 3 個名稱（順序＝優先 1→2→3），先開頁加入，其餘每輪隨機。留空＝全隨機。",
+            "priority": cfg.get("tcsb", {}).get("priority", []),
         },
         "ehobby.json": {
             "_說明": "東海模型（ehobbyshop.com.tw）。這家跟其他四家不一樣：陀螺類商品目前還沒上架，"
@@ -643,6 +957,12 @@ def split_config_files(cfg: dict) -> None:
             "open_checkout_after_add": bool(fc.get("open_checkout_after_add", True)),
             "push": cfg.get("push", {"enabled": True, "telegram_bot_token": "", "telegram_chat_id": ""}),
             "_push說明": "手機推播（Telegram，可不填）。@BotFather 拿 token，@userinfobot 拿數字 id。",
+            "email": {"enabled": False, "to": "", "smtp_host": "smtp.gmail.com",
+                      "smtp_port": 587, "smtp_user": "", "smtp_password": ""},
+            "_email說明": "有貨/新上架寄信通知（會排除：整家店停用、品項自動:關、被✕移除的）。"
+                          "smtp_user 填寄件 Gmail、smtp_password 填該帳號的『應用程式密碼』"
+                          "（Google 帳戶 → 安全性 → 兩步驟驗證 → 應用程式密碼，16 碼），不是登入密碼。"
+                          "設好後開 http://localhost:8787/api/mail_test 寄測試信驗證。",
         },
     }
     for fname, data in files.items():
@@ -709,6 +1029,8 @@ def load_config() -> dict:
         "fast_cart": {
             "enabled": fb.get("enabled", True),
             "auto_add": fb.get("auto_add", True),
+            "auto_checkout": bool(fb.get("auto_checkout", False)),
+            "priority": fb.get("priority", []),
             "session_cookie": fb.get("session_cookie", ""),
             "cookie_source": fb.get("cookie_source", "manual"),
             "popup_alert": cm.get("popup_alert", True),
@@ -722,6 +1044,7 @@ def load_config() -> dict:
         "mm": mm,
         "server_port": cm.get("server_port", 8787),
         "push": cm.get("push", {}),
+        "email": cm.get("email", {}),
         "notify": legacy.get("notify", {}),
     }
     return cfg
@@ -738,8 +1061,8 @@ def make_session(cookie: str) -> requests.Session:
 _cookie_cache = {"val": None, "ts": 0.0, "src": ""}
 
 
-def _read_browser_cookie(browser: str) -> str:
-    """Read funbox cookies straight from the installed browser (no manual copy)."""
+def _read_browser_cookie(browser: str, domain: str = "funbox.com.tw") -> str:
+    """Read a site's cookies straight from the installed browser (no manual copy)."""
     try:
         import browser_cookie3 as bc
     except ImportError:
@@ -749,14 +1072,27 @@ def _read_browser_cookie(browser: str) -> str:
     if fn is None:
         return ""
     try:
-        cj = fn(domain_name="funbox.com.tw")
+        cj = fn(domain_name=domain)
         pairs = [f"{c.name}={c.value}" for c in cj if c.value]
         names = [c.name for c in cj]
-        _cookielog(f"{browser}: got {len(pairs)} cookies, names={names[:12]}")
+        _cookielog(f"{browser}[{domain}]: got {len(pairs)} cookies, names={names[:12]}")
         return "; ".join(pairs)
     except Exception as e:
-        _cookielog(f"{browser}: ERROR {type(e).__name__}: {e}")
+        _cookielog(f"{browser}[{domain}]: ERROR {type(e).__name__}: {e}")
         return ""
+
+
+def _prio_sort_key(name: str, prio_list):
+    """搶購優先級排序鍵。priority 名單（最多前 3 個，順序即優先 1→2→3）排最前面且照順序；
+    名單外的每輪隨機（random 現算，所以每輪重洗，不會固定偏袒某幾個）。
+    用法：hits.sort(key=lambda x: _prio_sort_key(x_的名稱, 該店priority))。"""
+    try:
+        i = list(prio_list or []).index(name)
+        if i < 3:
+            return (0, i)          # 前三：固定順序
+    except ValueError:
+        pass
+    return (1, random.random())    # 其餘：每輪隨機
 
 
 def _cookielog(msg: str) -> None:
@@ -810,6 +1146,35 @@ def get_cookie_header(cfg: dict) -> str:
         if val:
             break
     _cookie_cache.update(val=val, ts=now, src=source)
+    return val
+
+
+_tcsb_cookie_cache = {"val": None, "ts": 0.0, "src": ""}
+
+
+def get_tcsb_cookie(cfg: dict) -> str:
+    """墊腳石的 cookie 來源解析，跟 funbox 同一套邏輯：
+    手動貼的 session_cookie 永遠優先；沒貼且 cookie_source 指定瀏覽器時，
+    直接從該瀏覽器讀 tcsb.com.tw 的即時 cookie（快取 30 秒，省得每輪都解密）。
+    這樣只要瀏覽器保持登入，後端永遠拿到最新 cookie，不用再手動重貼。"""
+    tc = cfg.get("tcsb", {}) or {}
+    manual = _parse_cookie_input(tc.get("session_cookie", ""))
+    if manual:
+        return manual
+    source = (tc.get("cookie_source") or "manual").strip().lower()
+    if source == "manual":
+        return ""
+    now = time.time()
+    if _tcsb_cookie_cache["ts"] and _tcsb_cookie_cache["src"] == source \
+            and now - _tcsb_cookie_cache["ts"] < 30:
+        return _tcsb_cookie_cache["val"]
+    order = [source] if source in ("edge", "chrome", "chromium", "brave", "firefox") else ["edge", "chrome"]
+    val = ""
+    for b in order:
+        val = _read_browser_cookie(b, domain="tcsb.com.tw")
+        if val:
+            break
+    _tcsb_cookie_cache.update(val=val, ts=now, src=source)
     return val
 
 
@@ -1044,6 +1409,7 @@ def poll_loop(cfg: dict) -> None:
     uniq_queries = sorted({t["_q"] for t in targets})
     workers = min(10, max(1, len(uniq_queries)))
 
+    load_priority(cfg)          # 從 config 載入各店搶購優先級到即時全域 PRIORITY
     # 誠品目標
     escfg = cfg.get("eslite", {})
     eslite_targets = normalize_eslite(escfg.get("targets", [])) if escfg.get("enabled") else []
@@ -1161,6 +1527,10 @@ def poll_loop(cfg: dict) -> None:
     last_eh = 0.0
     forced = True   # 首輪立即查誠品/momo/墊腳石；之後「立刻偵測」也會強制查
     prev_added_fb: dict[str, bool] = {}   # 免 cookie 模式：已開過商品頁的型號
+    prev_opened_fb: dict = {}  # cookie 模式：本次執行已開過購物車頁的型號
+                               # （「已在購物車」也要開頁 —— 每型號每次執行只開一次，
+                               #   按「立刻偵測」會清掉重來。之前只有「新加入」才開頁，
+                               #   重啟後商品早已在車裡就永遠不開，使用者只能自己按。）
 
     with STATE_LOCK:
         for t in targets:
@@ -1189,9 +1559,52 @@ def poll_loop(cfg: dict) -> None:
 
     with ThreadPoolExecutor(max_workers=workers) as pool_ex:
         while True:
+            # ---- 撿起儀表板「＋新增」的目標（不用重開程式）----
+            with PENDING_LOCK:
+                _pend = {k: v[:] for k, v in PENDING_ADDS.items() if v}
+                for k in _pend:
+                    PENDING_ADDS[k].clear()
+            if _pend.get("funbox"):
+                for t in normalize_targets(_pend["funbox"]):
+                    t["_q"] = query_for(t["code"], t["query"], groups)
+                    targets.append(t)
+                uniq_queries = sorted({t["_q"] for t in targets})
+            if _pend.get("eslite"):
+                eslite_targets.extend(normalize_eslite(_pend["eslite"]))
+            if _pend.get("momo"):
+                momo_targets.extend(normalize_momo(_pend["momo"]))
+            if _pend.get("tcsb"):
+                tcsb_targets.extend(normalize_tcsb(_pend["tcsb"]))
+            if _pend.get("ehobby") and eh_on:
+                # 新名稱先補找一次（已上架 → 直接轉盯庫存），跟啟動時的邏輯一致
+                for _t in _pend["ehobby"]:
+                    _n = _target_display_name("ehobby", _t)
+                    if not _n:
+                        continue
+                    try:
+                        _hit, _rep = ehobby_core.find_by_name(eh_session, _n, gap=eh_gap)
+                    except Exception:
+                        _hit = None
+                    if _hit:
+                        eh_watch.append((_hit["id"], _n))
+                        with STATE_LOCK:
+                            STATE["ehobby"][_n] = {
+                                "name": _n, "kind": "watch", "id": _hit["id"],
+                                "listed": True, "buyable": None, "price": "",
+                                "title": _hit["title"], "matched": [], "foundAt":
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "url": _hit["url"]}
+                        log_event("ehobby", _n[:40], "已在站內找到商品，改盯庫存",
+                                  ok=True, detail=_hit["title"][:60], url=_hit["url"])
+                    else:
+                        eh_keywords.append(_n)
+            if _pend.get("momo") or _pend.get("eslite") or _pend.get("tcsb") or _pend.get("ehobby"):
+                forced = True          # 新目標這一輪就查，不等各家間隔
+
             # 手動按「立刻偵測」：清掉「上一輪就有貨」的記錄，
             # 讓目前已經有貨的品項也會重新自動加入／開頁（不然只有「缺貨→有貨」那一刻才動作）
             if forced:
+                prev_opened_fb.clear()
                 prev_esl.clear()
                 prev_momo.clear()
                 prev_tcsb.clear()
@@ -1209,7 +1622,7 @@ def poll_loop(cfg: dict) -> None:
                         results.append((t["code"], resolve_status(t, prods, session, variant_cache)))
             with STATE_LOCK:
                 for code, status in results:
-                    if status is not None:
+                    if status is not None and not is_removed("funbox", code):
                         STATE["targets"][code] = status
                 STATE["last_checked"] = datetime.now().strftime("%H:%M:%S")
             # 推播：首次可買才推（避免每輪洗頻）
@@ -1220,6 +1633,8 @@ def poll_loop(cfg: dict) -> None:
                 if b and not prev_buyable.get(code, False):
                     off = is_off("funbox", code)
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    mail_alert(cfg, "funbox", code, f"🔔 Funbox 上架可買：{code}",
+                               (status.get("title") or code), status.get("url", ""))
                     send_push(cfg, f"🔔 上架可買：{code}",
                               (status.get("title") or code) +
                               ("（此型號已停用自動加入）" if off else "") +
@@ -1242,6 +1657,8 @@ def poll_loop(cfg: dict) -> None:
                 buyables = [(c, s) for c, s in results
                             if s and s.get("buyable") and s.get("variant_id")
                             and not is_off("funbox", c)]   # 跳過被關閉自動加入的型號
+                # 搶購優先級：priority 名單前三照順序先加，其餘每輪隨機（讀即時全域）
+                buyables.sort(key=lambda cs: _prio_sort_key(cs[0], PRIORITY["funbox"]))
                 if buyables and not has_fb_cookie:
                     # 免 cookie 模式：開商品頁下暗號，交給 funbox_grab 腳本用你的登入狀態加入
                     for code, status in buyables:
@@ -1252,7 +1669,8 @@ def poll_loop(cfg: dict) -> None:
                             continue
                         prev_added_fb[code] = True
                         try:
-                            webbrowser.open(url + ("&" if "?" in url else "?") + "fbauto=1")
+                            webbrowser.open(url + ("&" if "?" in url else "?") + "fbauto=1" +
+                                            "&fborder=" + ("1" if fb_auto_on(cfg) else "0"))
                             time.sleep(1.5)
                         except Exception:
                             pass
@@ -1273,6 +1691,10 @@ def poll_loop(cfg: dict) -> None:
                         if in_cart:
                             with STATE_LOCK:
                                 STATE["targets"][code]["autoAdded"] = True
+                            if code not in prev_opened_fb:
+                                prev_opened_fb[code] = True
+                                added_any = True          # 已在車裡也要開結帳頁（本次執行第一次看到才開）
+                                _addlog(f"FUNBOX already-in-cart {code} → 開購物車頁")
                             continue
                         r = add_to_cart(cfg, status["variant_id"], 1)   # 數量固定 1
                         ok = bool(r.get("ok"))
@@ -1285,6 +1707,7 @@ def poll_loop(cfg: dict) -> None:
                                   ok=ok, detail=str(r.get("reason", "")), url=url)
                         if ok:
                             added_any = True
+                            prev_opened_fb[code] = True
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             with STATE_LOCK:
                                 STATE["targets"][code]["autoAddedAt"] = ts
@@ -1304,10 +1727,19 @@ def poll_loop(cfg: dict) -> None:
                                           ok=None, detail="請重新複製 cookie 或改用免 cookie 模式", url=url)
             # 有任何新放入就開一次購物車結帳頁
             if added_any and fc.get("open_checkout_after_add", True):
+                _cart_url = f"{BASE}/cart?fborder=" + ("1" if fb_auto_on(cfg) else "0")
                 try:
-                    webbrowser.open(f"{BASE}/cart")
-                except Exception:
-                    pass
+                    # ⚠ webbrowser.open 開的是 Windows「預設瀏覽器」——
+                    #   如果你在用的瀏覽器不是預設的，分頁會開去另一個瀏覽器（看起來像沒開）。
+                    _opened = webbrowser.open(_cart_url)
+                    _addlog(f"OPEN funbox cart url={_cart_url} returned={_opened}")
+                    log_event("funbox", "購物車", "已開購物車頁（預設瀏覽器）", ok=None,
+                              detail="分頁開在 Windows 預設瀏覽器；沒看到請檢查其他瀏覽器視窗",
+                              url=_cart_url)
+                except Exception as _e:
+                    _addlog(f"OPEN funbox cart FAILED {type(_e).__name__}: {_e}")
+                    log_event("funbox", "購物車", "開購物車頁失敗", ok=False,
+                              detail=f"{type(_e).__name__}: {_e}", url=_cart_url)
             # 誠品：序列查詢＋每筆間隔＋較慢節奏（避免 429 被限流）
             now_ts = time.time()
             do_esl = (eslite_targets and STORE_ON.get("eslite", True)
@@ -1317,9 +1749,11 @@ def poll_loop(cfg: dict) -> None:
                 with ThreadPoolExecutor(max_workers=3) as _ep:
                     esl_results = list(_ep.map(
                         lambda e: (e, eslite_status(e)), eslite_targets))
+                # 搶購優先級：priority 名單前三照順序先開頁加入，其餘每輪隨機（讀即時全域）
+                esl_results.sort(key=lambda es: _prio_sort_key(es[0].get("name", ""), PRIORITY["eslite"]))
                 for e, s in esl_results:
                     name = e["name"]
-                    if s is None:
+                    if s is None or is_removed("eslite", name):
                         continue
                     with STATE_LOCK:
                         STATE["eslite"][name] = {
@@ -1332,6 +1766,10 @@ def poll_loop(cfg: dict) -> None:
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         off = is_off("eslite", name)
                         auto_grab = bool(escfg.get("auto_grab")) and not off
+                        mail_alert(cfg, "eslite", name, f"🔔 誠品上架可買：{name}",
+                                   (s.get("name") or name) +
+                                   (f"　NT${s.get('price')}" if s.get("price") else ""),
+                                   s.get("url", ""))
                         send_push(cfg, f"🔔 誠品上架可買：{name}",
                                   (s.get("name") or name) + ("（此項已停用自動加入）" if off else "") +
                                   f"\n偵測時間 {now_str}", s["url"])
@@ -1367,7 +1805,7 @@ def poll_loop(cfg: dict) -> None:
                 momo_to_open = []
                 for m, s in momo_results:
                     name = m["name"]
-                    if s is None:
+                    if s is None or is_removed("momo", name):
                         continue
                     ic = s.get("i_code", "")
                     url = s.get("url") or f"https://www.momoshop.com.tw/goods/GoodsDetail.jsp?i_code={ic}"
@@ -1405,6 +1843,8 @@ def poll_loop(cfg: dict) -> None:
                     # B) 已直接開賣（無開賣橫幅、有貨）：偵測到可買就立刻開頁搶
                     if s.get("buyable") and ic and not prev_momo.get(name, False):
                         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        mail_alert(cfg, "momo", name, f"🔔 momo 上架可買：{name}",
+                                   (s.get("title") or name), url)
                         send_push(cfg, f"🔔 momo 上架可買：{name}",
                                   name + ("（此項已停用自動加入）" if off else "") +
                                   f"\n正價 {s.get('price','?')}\n偵測時間 {now_str}", url)
@@ -1441,11 +1881,13 @@ def poll_loop(cfg: dict) -> None:
                 with ThreadPoolExecutor(max_workers=3) as _tp:
                     tcsb_results = list(_tp.map(
                         lambda c: (c, tcsb_status(c, tcsb_skip_books, tcsb_exclude)), tcsb_targets))
+                # 搶購優先級：priority 名單前三照順序先開頁加入，其餘每輪隨機（讀即時全域）
+                tcsb_results.sort(key=lambda cs: _prio_sort_key(cs[0].get("name", ""), PRIORITY["tcsb"]))
                 # 先收集這一輪「新變成有貨」的品項，統一處理（多商品只開一次結帳頁）
                 tcsb_hits = []
                 for c, s in tcsb_results:
                     name = c["name"]
-                    if s is None:
+                    if s is None or is_removed("tcsb", name):
                         continue
                     with STATE_LOCK:
                         STATE["tcsb"][name] = {
@@ -1462,6 +1904,10 @@ def poll_loop(cfg: dict) -> None:
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     for name, st in tcsb_hits:
                         off = is_off("tcsb", name)
+                        mail_alert(cfg, "tcsb", name, f"🔔 墊腳石有貨：{name}",
+                                   (st.get("title") or name) +
+                                   (f"　NT${st.get('price')}" if st.get("price") else ""),
+                                   st.get("url", ""))
                         send_push(cfg, f"🔔 墊腳石有貨：{name}",
                                   (st.get("name") or name) +
                                   ("（此項已停用自動加入）" if off else "") +
@@ -1632,6 +2078,8 @@ def poll_loop(cfg: dict) -> None:
                     with STATE_LOCK:
                         # 新上架命中 → 亮的是「那個型號自己的卡片」（跟其他分頁一致）
                         for kw in matched:
+                            if is_removed("ehobby", kw):
+                                continue
                             STATE["ehobby"][kw] = {
                                 "name": kw, "kind": "target", "id": h["id"],
                                 "listed": True, "buyable": h.get("buyable"),
@@ -1639,6 +2087,13 @@ def poll_loop(cfg: dict) -> None:
                                 "matched": matched, "foundAt": now_str, "url": h["url"]}
                     buy_txt = ("有貨" if h.get("buyable") is True else
                                "缺貨/可設貨到通知" if h.get("buyable") is False else "庫存判斷不出來")
+                    _mk = [kw for kw in (matched or []) if not is_off("ehobby", kw)]
+                    if _mk:
+                        mail_alert(cfg, "ehobby", _mk[0],
+                                   f"🆕 東海新上架：{h['title'][:40]}",
+                                   f"{h['title']}\n{buy_txt}" +
+                                   (f"　NT${h['price']}" if h.get("price") else "") +
+                                   f"\n命中：{'、'.join(matched)}", h["url"])
                     send_push(cfg, f"🆕 東海新上架：{h['title'][:40]}",
                               f"命中關鍵字 {'、'.join(h.get('matched', []))}\n"
                               f"{buy_txt}" + (f"　NT${h['price']}" if h.get("price") else "") +
@@ -1669,6 +2124,8 @@ def poll_loop(cfg: dict) -> None:
                     if not d:
                         continue
                     key = wname or ("watch:" + str(pid))
+                    if is_removed("ehobby", key):
+                        continue
                     with STATE_LOCK:
                         STATE["ehobby"][key] = {
                             "name": wname or (d.get("title") or str(pid)), "id": pid,
@@ -1678,6 +2135,10 @@ def poll_loop(cfg: dict) -> None:
                             "foundAt": now_str, "url": d["url"]}
                     b = d.get("buyable") is True
                     if b and not prev_eh_watch.get(pid, False):
+                        mail_alert(cfg, "ehobby", key,
+                                   f"🔔 東海補貨：{(d.get('title') or '')[:40]}",
+                                   (d.get("title") or "") +
+                                   (f"　NT${d['price']}" if d.get("price") else ""), d["url"])
                         send_push(cfg, f"🔔 東海補貨：{(d.get('title') or '')[:40]}",
                                   f"偵測時間 {now_str}", d["url"])
                         if cfg.get("fast_cart", {}).get("popup_alert", True):
@@ -1756,17 +2217,30 @@ def add_to_cart(cfg: dict, variant_id: str, qty: int):
         return {"ok": False, "reason": "logged_out", "cart_url": cart_url}
 
     session = make_session(cookie)
-    try:
-        r = session.post(
-            f"{BASE}/cart/add",
-            data={"id": variant_id, "quantity": qty},
-            headers={"X-Requested-With": "XMLHttpRequest",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-            timeout=15, allow_redirects=False,
-        )
-    except requests.RequestException as e:
-        _addlog(f"id={variant_id} NETWORK ERROR {e}")
-        return {"ok": False, "reason": "network", "detail": str(e), "cart_url": cart_url}
+    # 搶購場關鍵：網路打嗝時「有貨可加」的機會稍縱即逝，等下一輪（間隔頗久）才重試往往就賣完了。
+    # 所以一遇 network 錯誤就『立即連續快速重試』：每次逾時縮短、間隔 1 秒、最多試 ADD_RETRIES 次。
+    # 只對「網路例外」重試；有回應（含 409 等 http 碼）就跳出交給下面判定，不重試。
+    ADD_RETRIES = 5
+    ADD_GAP = 1.0
+    r = None
+    last_err = None
+    for _attempt in range(ADD_RETRIES):
+        try:
+            r = session.post(
+                f"{BASE}/cart/add",
+                data={"id": variant_id, "quantity": qty},
+                headers={"X-Requested-With": "XMLHttpRequest",
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                timeout=8, allow_redirects=False,
+            )
+            break                       # 有回應就結束重試（成功/失敗的 http code 交給下面）
+        except requests.RequestException as e:
+            last_err = e
+            _addlog(f"id={variant_id} NETWORK ERROR (第 {_attempt + 1}/{ADD_RETRIES} 次) {e}")
+            if _attempt < ADD_RETRIES - 1:
+                time.sleep(ADD_GAP)
+    if r is None:                        # 連試 ADD_RETRIES 次全是網路錯誤 → 才真的放棄
+        return {"ok": False, "reason": "network", "detail": str(last_err), "cart_url": cart_url}
 
     loc = r.headers.get("Location", "").lower()
     body = r.text or ""
@@ -1798,6 +2272,9 @@ class Handler(BaseHTTPRequestHandler):
             payload["disabled"] = sorted(DISABLED)
             payload["config_errors"] = list(CONFIG_ERRORS)
             payload["stores"] = dict(STORE_ON)
+            payload["tcsb_login_lost"] = bool(
+                _tcsb_login_alert["ts"] and (time.time() - _tcsb_login_alert["ts"] < TCSB_LOGIN_ALERT_WINDOW))
+            payload["priority"] = {k: list(v) for k, v in PRIORITY.items()}   # 各店搶購優先級名單
             with EVENTS_LOCK:
                 payload["events"] = EVENTS[-120:][::-1]      # 最新的排前面
             self._send(200, json.dumps(payload, ensure_ascii=False))
@@ -1808,6 +2285,14 @@ class Handler(BaseHTTPRequestHandler):
                 "cookie_present": bool(cookie),
                 "logged_in": LOGIN_STATE["val"],
                 "auto_add": bool(cfg.get("fast_cart", {}).get("auto_add")),
+                "auto_checkout": fb_auto_on(cfg),
+                "eslite_auto_checkout": eslite_auto_on(cfg),
+                "tcsb_auto_checkout": tcsb_auto_on(cfg),
+                "mail_to_list": mail_recipients(cfg.get("email") or {}),
+                "mail_enabled": bool((cfg.get("email") or {}).get("enabled")),
+                "mail_sender": str((cfg.get("email") or {}).get("smtp_user", "")),
+                "mail_sender_ready": bool(str((cfg.get("email") or {}).get("smtp_user", "")).strip()
+                                          and str((cfg.get("email") or {}).get("smtp_password", "")).strip()),
             }))
         elif self.path.startswith("/api/tcsb_test"):
             # 診斷用：在你自己電腦上打開 http://localhost:8787/api/tcsb_test
@@ -1859,7 +2344,7 @@ class Handler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 mm_state = {k: dict(v) for k, v in STATE["mm"].items()}
             for t in tg:
-                if is_off("mm", t["name"]):
+                if is_off("mm", t["name"]) or is_removed("mm", t["name"]):
                     continue
                 items.append({
                     "name": t["name"], "spec": t["spec"],
@@ -1871,6 +2356,40 @@ class Handler(BaseHTTPRequestHandler):
                 "cycle_seconds": max(120, int(mcfg.get("patrol_cycle_seconds", 300))),
                 "gap_seconds": max(2, int(mcfg.get("patrol_gap_seconds", 4))),
             }, ensure_ascii=False), extra={"Access-Control-Allow-Origin": "*"})
+        elif self.path.startswith("/api/fb_mode"):
+            # funbox 腳本每次載入直接來問模式 —— 比「網址帶暗號」可靠：
+            # 儀表板開關一按，任何 funbox 分頁重新整理就生效，不用管頁面是誰開的。
+            cfg = load_config()
+            self._send(200, json.dumps({"auto": fb_auto_on(cfg)}),
+                       extra={"Access-Control-Allow-Origin": "*"})
+        elif self.path.startswith("/api/eslite_mode"):
+            # 誠品腳本每次到 step2 直接來問模式 —— 儀表板一按，任何誠品分頁重新整理就生效。
+            cfg = load_config()
+            self._send(200, json.dumps({"auto": eslite_auto_on(cfg)}),
+                       extra={"Access-Control-Allow-Origin": "*"})
+        elif self.path.startswith("/api/tcsb_mode"):
+            # 墊腳石腳本每次到結帳頁直接來問模式 —— 儀表板一按，結帳頁重新整理就生效。
+            cfg = load_config()
+            self._send(200, json.dumps({"auto": tcsb_auto_on(cfg)}),
+                       extra={"Access-Control-Allow-Origin": "*"})
+        elif self.path.startswith("/api/mail_test"):
+            # 診斷用：http://localhost:8787/api/mail_test 立刻寄一封測試信
+            cfg = load_config()
+            em = cfg.get("email", {})
+            if not em.get("enabled"):
+                self._send(200, json.dumps({"ok": False,
+                    "說明": "config/common.json 的 email.enabled 是 false"}, ensure_ascii=False, indent=2))
+                return
+            if not (str(em.get("smtp_user","")).strip() and str(em.get("smtp_password","")).strip()):
+                self._send(200, json.dumps({"ok": False,
+                    "說明": "還沒填 smtp_user / smtp_password（Gmail 應用程式密碼），見 config/common.json 的 _email說明"},
+                    ensure_ascii=False, indent=2))
+                return
+            send_mail_async(cfg, "📧 測試信：戰鬥陀螺上架監控",
+                            "看到這封代表寄信設定成功。之後有貨/新上架就會寄到這裡。")
+            self._send(200, json.dumps({"ok": True,
+                "說明": f"已送出測試信到 {em.get('to')}，結果看「動作紀錄」分頁（成功=已寄出通知信 / 失敗會寫原因）"},
+                ensure_ascii=False, indent=2))
         elif self.path.startswith("/api/ehobby_find"):
             # 診斷用：http://localhost:8787/api/ehobby_find?q=TOMICA%20...
             # 用站內搜尋實找一次，回報每個候選網址格式的結果 —— 找不到時先開這個看卡在哪。
@@ -1988,6 +2507,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 p = {}
             key = str(p.get("cfgName") or p.get("pathname") or p.get("url") or "").strip()
+            if key and is_removed("mm", key):
+                self._send(200, json.dumps({"ok": True, "removed": True}))
+                return
             if not key:
                 self._send(200, json.dumps({"ok": False, "reason": "no_key"}))
                 return
@@ -2052,6 +2574,9 @@ class Handler(BaseHTTPRequestHandler):
                           detail=f"規格 {p.get('specText','')}　庫存 {p.get('stock')}",
                           url=p.get("url", ""))
                 # 使用者要的：庫存 > 0 當下就通知，不用等加入購物車成功
+                mail_alert(cfg, "mm", key, f"🔔 M.M小舖規格有貨：{key[:40]}",
+                           f"{name}\n規格 {p.get('specText','')}\n庫存 {p.get('stock')}",
+                           p.get("url", ""))
                 send_push(cfg, f"🔔 M.M小舖規格有貨：{key[:40]}",
                           f"規格 {p.get('specText','')}\n庫存 {p.get('stock')}\n"
                           f"偵測時間 {now_str}\n巡邏腳本正在自動加入購物車",
@@ -2062,6 +2587,225 @@ class Handler(BaseHTTPRequestHandler):
                                 f"庫存：{p.get('stock')}\n偵測時間：{now_str}\n\n"
                                 "巡邏腳本正在自動加入購物車，加入成功會再通知並開購物車頁。")
             self._send(200, json.dumps({"ok": True}))
+            return
+        if self.path.startswith("/api/mail_sender"):
+            # 儀表板「綁定寄件信箱」：寫入 smtp_user / smtp_password（反向更新 config）。
+            # ⚠ 密碼絕對不落 log、不進動作紀錄 —— 只記「已綁定哪個地址」。
+            p = self._read_json()
+            user = str(p.get("user", "")).strip()
+            pw = str(p.get("password", "")).replace(" ", "").strip()
+            if "@" not in user or " " in user:
+                self._send(200, json.dumps({"ok": False, "reason": "寄件信箱格式不對（要含 @）"},
+                                           ensure_ascii=False))
+                return
+            if len(pw) < 8:
+                self._send(200, json.dumps({"ok": False,
+                    "reason": "應用程式密碼太短（Google 給的是 16 個字母）"}, ensure_ascii=False))
+                return
+            try:
+                cpath = CONFIG_DIR / "common.json"
+                d = json.loads(cpath.read_text(encoding="utf-8"))
+                em = d.setdefault("email", {})
+                em["smtp_user"] = user
+                em["smtp_password"] = pw
+                em.setdefault("enabled", True)
+                cpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "reason": f"config 寫入失敗: {e}"},
+                                           ensure_ascii=False))
+                return
+            _addlog(f"MAIL-SENDER bound -> {user}")
+            log_event("mail", "寄件信箱", f"已綁定 {user}", ok=None,
+                      detail="config 已同步（密碼不記錄）", url="")
+            self._send(200, json.dumps({"ok": True, "user": user}, ensure_ascii=False))
+            return
+        if self.path.startswith("/api/mail_to"):
+            # 通知收件人清單維護：action=add / remove，反向寫回 email.to（存成陣列）。
+            p = self._read_json()
+            action = str(p.get("action", "add")).strip()
+            addr = str(p.get("to", "")).strip()
+            if action != "remove" and ("@" not in addr or " " in addr):
+                self._send(200, json.dumps({"ok": False, "reason": "不是有效的信箱格式"},
+                                           ensure_ascii=False))
+                return
+            try:
+                cpath = CONFIG_DIR / "common.json"
+                d = json.loads(cpath.read_text(encoding="utf-8"))
+                em = d.setdefault("email", {})
+                cur = mail_recipients(em)          # 現有清單（字串或陣列都吃）
+                if action == "remove":
+                    cur = [a for a in cur if a != addr]
+                else:
+                    if addr not in cur:
+                        cur.append(addr)
+                em["to"] = cur                     # 一律存成陣列
+                cpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "reason": f"config 寫入失敗: {e}"},
+                                           ensure_ascii=False))
+                return
+            _addlog(f"MAIL-TO {action} {addr} -> {cur}")
+            log_event("mail", "通知信箱",
+                      (f"新增收件人 {addr}" if action != "remove" else f"移除收件人 {addr}"),
+                      ok=None, detail="目前 " + ("、".join(cur) or "（無）"), url="")
+            self._send(200, json.dumps({"ok": True, "list": cur}, ensure_ascii=False))
+            return
+        if self.path.startswith("/api/fb_mode"):
+            # funbox 下單模式切換：true=自動送出（v1.4，限貨到付款）/ false=手動確認（v1.2.1 行為）
+            p = self._read_json()
+            want = bool(p.get("auto"))
+            FB_AUTO["val"] = want
+            try:
+                fpath = CONFIG_DIR / "funbox.json"
+                d = json.loads(fpath.read_text(encoding="utf-8"))
+                d["auto_checkout"] = want
+                fpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                changed = True
+            except Exception:
+                changed = False
+            _addlog(f"FB-MODE auto_checkout={want} config_changed={changed}")
+            log_event("funbox", "下單模式",
+                      "切換為：自動送出訂單（貨到付款）" if want else "切換為：手動確認送出",
+                      ok=None, detail="config 已同步" if changed else "config 寫入失敗（見紅色警告）", url="")
+            self._send(200, json.dumps({"ok": True, "auto": want, "config_changed": changed}))
+            return
+        if self.path.startswith("/api/eslite_mode"):
+            # 誠品下單模式切換：true=自動按「確認結帳」送出（限超商取貨付款）/ false=手動確認（預設）
+            p = self._read_json()
+            want = bool(p.get("auto"))
+            ES_AUTO["val"] = want
+            try:
+                fpath = CONFIG_DIR / "eslite.json"
+                d = json.loads(fpath.read_text(encoding="utf-8"))
+                d["auto_checkout"] = want
+                fpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                changed = True
+            except Exception:
+                changed = False
+            _addlog(f"ES-MODE auto_checkout={want} config_changed={changed}")
+            log_event("eslite", "下單模式",
+                      "切換為：自動確認結帳（超商取貨付款）" if want else "切換為：手動確認送出",
+                      ok=None, detail="config 已同步" if changed else "config 寫入失敗（見紅色警告）", url="")
+            self._send(200, json.dumps({"ok": True, "auto": want, "config_changed": changed}))
+            return
+        if self.path.startswith("/api/tcsb_mode"):
+            # 墊腳石下單模式切換：true=自動按「送出訂單」（限取貨付款/貨到付款）/ false=手動（預設）
+            p = self._read_json()
+            want = bool(p.get("auto"))
+            TCSB_AUTO["val"] = want
+            try:
+                fpath = CONFIG_DIR / "tcsb.json"
+                d = json.loads(fpath.read_text(encoding="utf-8"))
+                d["auto_checkout"] = want
+                fpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                changed = True
+            except Exception:
+                changed = False
+            _addlog(f"TCSB-MODE auto_checkout={want} config_changed={changed}")
+            log_event("tcsb", "下單模式",
+                      "切換為：自動送出訂單（取貨付款）" if want else "切換為：手動送出訂單",
+                      ok=None, detail="config 已同步" if changed else "config 寫入失敗（見紅色警告）", url="")
+            self._send(200, json.dumps({"ok": True, "auto": want, "config_changed": changed}))
+            return
+        if self.path.startswith("/api/priority"):
+            # 儀表板設定/更動搶購優先級：整份名單送來（順序＝優先 1→2→3，最多取 3）。
+            # 即時寫入全域 PRIORITY（當輪就生效）＋反向寫回該店 config 的 priority。
+            p = self._read_json()
+            store = str(p.get("store", "")).strip()
+            names = [str(x).strip() for x in (p.get("priority") or []) if str(x).strip()]
+            # 去重、保序、最多 3
+            seen, ordered = set(), []
+            for n in names:
+                if n not in seen:
+                    seen.add(n); ordered.append(n)
+            ordered = ordered[:3]
+            if store not in PRIORITY_STORES:
+                self._send(200, json.dumps({"ok": False, "reason": "bad_store"}))
+                return
+            PRIORITY[store] = ordered
+            changed = False
+            try:
+                fpath = CONFIG_DIR / PRIORITY_CFG_FILE[store]
+                d = json.loads(fpath.read_text(encoding="utf-8"))
+                d["priority"] = ordered
+                fpath.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+                changed = True
+            except Exception:
+                changed = False
+            _addlog(f"PRIORITY {store} -> {ordered} config_changed={changed}")
+            log_event(store, "搶購優先級",
+                      ("設為：" + "、".join(f"{i+1}.{n}" for i, n in enumerate(ordered))) if ordered else "清空優先級",
+                      ok=None, detail="config 已同步" if changed else "config 寫入失敗", url="")
+            self._send(200, json.dumps({"ok": True, "priority": ordered, "config_changed": changed}))
+            return
+        if self.path.startswith("/api/tcsb_login_alert"):
+            # 墊腳石腳本偵測到「瀏覽器未登入」時回報 → 推播＋寄信＋儀表板紅字（30 分鐘冷卻，避免洗頻）。
+            # 只提醒，不碰密碼、不代登入。
+            try:
+                p = self._read_json()
+            except Exception:
+                p = {}
+            where = str(p.get("where", ""))[:40]
+            now = time.time()
+            recent = bool(_tcsb_login_alert["ts"] and (now - _tcsb_login_alert["ts"] < TCSB_LOGIN_ALERT_WINDOW))
+            _tcsb_login_alert["ts"] = now
+            alerted = not recent
+            if alerted:
+                cfg = load_config()
+                _addlog(f"TCSB login-lost where={where}")
+                log_event("tcsb", "登入狀態", "偵測到墊腳石未登入，請在瀏覽器重新登入",
+                          ok=False, detail=where or "", url="https://www.tcsb.com.tw/member/login")
+                send_push(cfg, "⚠ 墊腳石登入過期",
+                          "偵測到墊腳石在瀏覽器未登入。請重新登入，否則有貨時無法自動加入購物車。")
+                em = cfg.get("email") or {}
+                if em.get("enabled") and str(em.get("smtp_user", "")).strip() and str(em.get("smtp_password", "")).strip():
+                    send_mail_async(cfg, "⚠ 墊腳石登入過期，請重新登入",
+                                    "偵測到墊腳石在瀏覽器未登入。\n請到 https://www.tcsb.com.tw 重新登入（記得勾記住我），"
+                                    "否則有貨時無法自動加入購物車與結帳。")
+            self._send(200, json.dumps({"ok": True, "alerted": alerted}),
+                       extra={"Access-Control-Allow-Origin": "*"})
+            return
+        if self.path.startswith("/api/order_report"):
+            # funbox_grab 自動下單模式的回報（成功送出 / 找不到 ATM / 重複守衛擋下）
+            try:
+                p = self._read_json()
+            except Exception:
+                p = {}
+            models = [str(x) for x in (p.get("models") or [])]
+            note = str(p.get("note", ""))[:120]
+            ok = p.get("ok")
+            label = "、".join(models) or "訂單"
+            cfg = load_config()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _addlog(f"FB-ORDER ok={ok} models={models} note={note}")
+            log_event("funbox", label[:40],
+                      "已自動送出訂單（ATM）" if ok else "自動下單未執行",
+                      ok=bool(ok) if ok is not None else None, detail=note, url=f"{BASE}/cart")
+            if ok:
+                send_push(cfg, f"🚀 已自動送出訂單：{label[:40]}",
+                          f"{note}\n時間 {now_str}\n⚠️ 記得去 ATM 繳費，不繳訂單會自動取消", f"{BASE}/cart")
+                send_mail_async(cfg, f"🚀 Funbox 已自動送出訂單：{label[:40]}",
+                                f"{note}\n時間 {now_str}\n記得去 ATM 繳費，不繳訂單會自動取消")
+                if cfg.get("fast_cart", {}).get("popup_alert", True):
+                    popup_alert("🚀 已自動送出訂單（ATM）",
+                                f"{label}\n\n{note}\n時間：{now_str}\n\n⚠️ 記得去 ATM 繳費！")
+            else:
+                send_push(cfg, f"⚠️ Funbox 自動下單未執行：{label[:40]}", note, f"{BASE}/cart")
+            self._send(200, json.dumps({"ok": True}))
+            return
+        if self.path.startswith("/api/add_target"):
+            p = self._read_json()
+            r = add_target(str(p.get("store", "")).strip(),
+                           str(p.get("value", "")),
+                           str(p.get("name", "") or ""))
+            self._send(200, json.dumps(r, ensure_ascii=False))
+            return
+        if self.path.startswith("/api/remove_target"):
+            p = self._read_json()
+            r = remove_target(str(p.get("store", "")).strip(),
+                              str(p.get("name", "")).strip(),
+                              str(p.get("id", "") or "").strip())
+            self._send(200, json.dumps(r, ensure_ascii=False))
             return
         if self.path.startswith("/api/mm_open"):
             cfg = load_config()
@@ -2146,6 +2890,36 @@ def _bind(port: int) -> tuple[ThreadingHTTPServer, int]:
     raise last
 
 
+def _keep_system_awake() -> bool:
+    """Windows：程式執行期間主動告訴系統『別睡』（等同影片播放器的保持喚醒）。
+    重點：Modern Standby 機種只要『螢幕一關』就會開始進待命（然後斷網），所以這裡
+    連『螢幕也保持開啟』一起擋（ES_DISPLAY_REQUIRED）——否則螢幕自己暗掉就前功盡棄。
+      ES_SYSTEM_REQUIRED  擋系統閒置睡眠
+      ES_DISPLAY_REQUIRED 擋螢幕關閉（Modern Standby 的睡眠開關就是螢幕）
+      ES_CONTINUOUS       讓上面持續有效（直到程式結束或重設）
+    代價：螢幕會一直亮（可把亮度調到最暗）。這是『待命就斷網』機種唯一能穩定不睡的做法。"""
+    try:
+        import sys as _s
+        if _s.platform == "win32":
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _awake_loop() -> None:
+    # 每 60 秒重新宣告一次，防止被其他程式或系統事件重設。
+    while True:
+        _keep_system_awake()
+        time.sleep(60)
+
+
 def main() -> None:
     import sys
     print("Python:", sys.version.split()[0], "| cwd:", HERE)
@@ -2163,6 +2937,13 @@ def main() -> None:
 
     print("Starting background poller...", flush=True)
     threading.Thread(target=poll_loop, args=(cfg,), daemon=True).start()
+
+    # 保持系統喚醒（闔蓋偵測用）——只在 Windows 生效，其他平台自動略過。
+    if _keep_system_awake():
+        threading.Thread(target=_awake_loop, daemon=True).start()
+        print("  保持喚醒已啟動（系統＋螢幕都保持不睡；螢幕會一直亮，可調到最暗省電）")
+    else:
+        print("  （非 Windows 或無法設定保持喚醒，略過）")
 
     # one-time push so you can confirm phone notifications work
     send_push(cfg, "✅ Funbox 監控已啟動", "推播設定成功，商品上架會通知你。")
